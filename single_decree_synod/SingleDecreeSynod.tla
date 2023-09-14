@@ -1,5 +1,5 @@
 ------------------------- MODULE SingleDecreeSynod -------------------------
-EXTENDS FiniteSets, Naturals, TLC
+EXTENDS FiniteSets, Naturals
 VARIABLES lastTried, prevVote, lastVote, replied, nextBal, msgs, ledger, voted
 CONSTANT N, MaxTries, NoNumber
 ----------------------------------------------------------------------------
