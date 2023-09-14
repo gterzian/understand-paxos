@@ -23,7 +23,7 @@ Participant == 1..N
 
 \* We also use N to limit the set of numbers that can be chosen.
 \*
-\* Number is the set of tuples of (decree number, participant),
+\* Number is the set of tuples of (participant, participant),
 \* ensuring each decree number is unique.
 Number == Participant \X Participant
 
