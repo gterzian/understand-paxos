@@ -20,7 +20,7 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
 }
 
 async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String) {
-    let closing = doc_handle.with_doc_mut(|doc| {
+    doc_handle.with_doc_mut(|doc| {
         let mut synod: Synod = hydrate(doc).unwrap();
         let our_info = synod.participants.get_mut(participant_id).unwrap();
 
@@ -29,17 +29,11 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
         let mut tx = doc.transaction();
         reconcile(&mut tx, &synod).unwrap();
         tx.commit();
-
-        synod.closing
     });
-
-    if closing {
-        return;
-    }
 
     loop {
         doc_handle.changed().await.unwrap();
-        let closing = doc_handle.with_doc_mut(|doc| {
+        doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
             let last_tried = synod
                 .participants
@@ -88,19 +82,13 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
             let mut tx = doc.transaction();
             reconcile(&mut tx, &synod).unwrap();
             tx.commit();
-
-            synod.closing
         });
-
-        if closing {
-            return;
-        }
     }
 }
 
 async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) {
     loop {
-        let closing = doc_handle.with_doc_mut(|doc| {
+        doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
             let mut next_bal = synod
                 .participants
@@ -128,21 +116,14 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &synod).unwrap();
             tx.commit();
-
-            synod.closing
         });
-
-        if closing {
-            return;
-        }
-
         doc_handle.changed().await.unwrap();
     }
 }
 
 async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: &String) {
     loop {
-        let closing = doc_handle.with_doc_mut(|doc| {
+        doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
             let mut next_bal = synod
                 .participants
@@ -163,14 +144,7 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: &String) {
             let mut tx = doc.transaction();
             reconcile(&mut tx, &synod).unwrap();
             tx.commit();
-
-            synod.closing
         });
-
-        if closing {
-            return;
-        }
-
         doc_handle.changed().await.unwrap();
     }
 }
@@ -233,7 +207,6 @@ struct Synod {
     pub participants: HashMap<String, Participant>,
     pub ballots: Vec<Ballot>,
     pub ledger: HashMap<String, Value>,
-    pub closing: bool,
 }
 
 struct NoStorage;
@@ -334,10 +307,7 @@ async fn main() {
     });
 
     let doc_handle = if bootstrap {
-        let mut synod: Synod = Synod {
-            closing: false,
-            ..Default::default()
-        };
+        let mut synod: Synod = Default::default();
         for participant_id in customers.clone() {
             let participant = Participant {
                 last_tried: Number(0, participant_id.clone()),
