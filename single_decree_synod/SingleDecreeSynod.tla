@@ -122,7 +122,7 @@ ChooseBallotNumber(p) == /\ lastTried[p][1] < MaxTries
                             [type : {"NextBallot"},
                               number: {lastTried'[p]},
                               src: {p}, 
-                              dest: Participant \ {p}]
+                              dest: Participant]
                          /\ UNCHANGED<<prevVote, nextBal, ledger, lastVote>>
 
 \* Step 2
