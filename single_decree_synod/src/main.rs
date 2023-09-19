@@ -1,3 +1,4 @@
+use automerge_repo::fs_store::FsStore;
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
 use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 use axum::extract::State;
@@ -8,7 +9,8 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::time::{sleep, Duration};
@@ -206,31 +208,55 @@ struct Synod {
     pub ledger: HashMap<String, Value>,
 }
 
-struct NoStorage;
+struct BlockingFsStorage(Arc<Mutex<FsStore>>);
 
-impl Storage for NoStorage {
-    fn get(&self, _id: DocumentId) -> BoxFuture<'static, Result<Option<Vec<u8>>, StorageError>> {
-        Box::pin(futures::future::ready(Ok(None)))
+impl Storage for BlockingFsStorage {
+    fn get(&self, id: DocumentId) -> BoxFuture<'static, Result<Option<Vec<u8>>, StorageError>> {
+        Box::pin(futures::future::ready(
+            self.0
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map_err(move |e| StorageError::Error),
+        ))
     }
 
     fn list_all(&self) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
-        Box::pin(futures::future::ready(Ok(vec![])))
+        Box::pin(futures::future::ready(
+            self.0
+                .lock()
+                .unwrap()
+                .list()
+                .map_err(move |e| StorageError::Error),
+        ))
     }
 
     fn append(
         &self,
-        _id: DocumentId,
-        _changes: Vec<u8>,
+        id: DocumentId,
+        changes: Vec<u8>,
     ) -> BoxFuture<'static, Result<(), StorageError>> {
-        Box::pin(futures::future::ready(Ok(())))
+        Box::pin(futures::future::ready(
+            self.0
+                .lock()
+                .unwrap()
+                .append(&id, &changes)
+                .map_err(move |e| StorageError::Error),
+        ))
     }
 
     fn compact(
         &self,
-        _id: DocumentId,
-        _full_doc: Vec<u8>,
+        id: DocumentId,
+        full_doc: Vec<u8>,
     ) -> BoxFuture<'static, Result<(), StorageError>> {
-        Box::pin(futures::future::ready(Ok(())))
+        Box::pin(futures::future::ready(
+            self.0
+                .lock()
+                .unwrap()
+                .compact(&id, &full_doc)
+                .map_err(move |e| StorageError::Error),
+        ))
     }
 }
 
@@ -264,7 +290,12 @@ async fn main() {
     let our_tcp_addr = format!("127.0.0.1:234{}", participant_id);
 
     // Create a repo.
-    let repo = Repo::new(None, Box::new(NoStorage));
+    let repo = Repo::new(
+        None,
+        Box::new(BlockingFsStorage(Arc::new(Mutex::new(
+            FsStore::open(Path::new("/tmp/")).unwrap(),
+        )))),
+    );
     let repo_handle = repo.run();
 
     // Start a tcp server.
