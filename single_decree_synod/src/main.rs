@@ -11,9 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
-use tokio::sync::mpsc::{self, Receiver};
-use tokio::sync::oneshot::{channel as oneshot, Sender as OneShotSender};
-use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
@@ -72,7 +69,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                     let mut rng = rand::thread_rng();
                     Value(rng.gen())
                 } else {
-                    highest_vote.value.clone()
+                    highest_vote.value
                 };
                 let ballot = Ballot {
                     number: last_tried,
@@ -109,7 +106,7 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
                 }
             }
 
-            let mut our_info = synod.participants.get_mut(participant_id).unwrap();
+            let our_info = synod.participants.get_mut(participant_id).unwrap();
 
             our_info.next_bal = next_bal;
 
@@ -131,15 +128,7 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: &String) {
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
-            let mut next_bal = synod
-                .participants
-                .get(participant_id)
-                .unwrap()
-                .next_bal
-                .clone();
-
-            let mut values: HashSet<Value> =
-                synod.ledger.iter().map(|(_, val)| val.clone()).collect();
+            let mut values: HashSet<Value> = synod.ledger.values().cloned().collect();
             if !values.is_empty() {
                 assert_eq!(values.len(), 1);
                 synod
