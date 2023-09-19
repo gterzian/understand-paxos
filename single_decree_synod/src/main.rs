@@ -6,6 +6,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -20,19 +21,23 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
 }
 
 async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String) {
-    doc_handle.with_doc_mut(|doc| {
-        let mut synod: Synod = hydrate(doc).unwrap();
-        let our_info = synod.participants.get_mut(participant_id).unwrap();
-
-        our_info.last_tried.increment();
-
-        let mut tx = doc.transaction();
-        reconcile(&mut tx, &synod).unwrap();
-        tx.commit();
-    });
-
     loop {
+        if rand::random() {
+            doc_handle.with_doc_mut(|doc| {
+                let mut synod: Synod = hydrate(doc).unwrap();
+                let our_info = synod.participants.get_mut(participant_id).unwrap();
+
+                our_info.last_tried.increment();
+
+                let mut tx = doc.transaction();
+                reconcile(&mut tx, &synod).unwrap();
+                tx.commit();
+            });
+            continue;
+        }
+
         doc_handle.changed().await.unwrap();
+
         doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
             let last_tried = synod
@@ -64,7 +69,8 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
 
             if count > synod.participants.len() / 2 {
                 let value = if let Value(0) = highest_vote.value {
-                    Value(last_tried.0)
+                    let mut rng = rand::thread_rng();
+                    Value(rng.gen())
                 } else {
                     highest_vote.value.clone()
                 };
@@ -140,6 +146,8 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: &String) {
                     .ledger
                     .insert(participant_id.clone(), values.drain().next().unwrap());
             }
+
+            println!("Ledger: {:?}", synod.ledger);
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &synod).unwrap();
