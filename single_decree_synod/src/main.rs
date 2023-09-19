@@ -126,7 +126,7 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
     }
 }
 
-async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: &String) {
+async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
@@ -217,7 +217,7 @@ impl Storage for BlockingFsStorage {
                 .lock()
                 .unwrap()
                 .get(&id)
-                .map_err(move |e| StorageError::Error),
+                .map_err(move |_| StorageError::Error),
         ))
     }
 
@@ -227,7 +227,7 @@ impl Storage for BlockingFsStorage {
                 .lock()
                 .unwrap()
                 .list()
-                .map_err(move |e| StorageError::Error),
+                .map_err(move |_| StorageError::Error),
         ))
     }
 
@@ -241,7 +241,7 @@ impl Storage for BlockingFsStorage {
                 .lock()
                 .unwrap()
                 .append(&id, &changes)
-                .map_err(move |e| StorageError::Error),
+                .map_err(move |_| StorageError::Error),
         ))
     }
 
@@ -255,7 +255,7 @@ impl Storage for BlockingFsStorage {
                 .lock()
                 .unwrap()
                 .compact(&id, &full_doc)
-                .map_err(move |e| StorageError::Error),
+                .map_err(move |_| StorageError::Error),
         ))
     }
 }
@@ -395,7 +395,7 @@ async fn main() {
     });
 
     handle.spawn(async move {
-        run_learner_algorithm(doc_handle, &participant_id).await;
+        run_learner_algorithm(doc_handle, participant_id).await;
     });
 
     let app = Router::new()
