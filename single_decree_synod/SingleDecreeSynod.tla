@@ -1,6 +1,6 @@
 ------------------------- MODULE SingleDecreeSynod -------------------------
 EXTENDS FiniteSets, Naturals
-VARIABLES lastTried, prevVote, lastVote, replied, nextBal, msgs, ledger, voted
+VARIABLES lastTried, prevVote, lastVote, replied, nextBal, msgs, ledger, voted, ballots
 CONSTANT N, MaxTries, NoNumber
 ----------------------------------------------------------------------------
 \* Specification of The Basic Protocol of 2.3 in
@@ -23,7 +23,7 @@ Participant == 1..N
 
 \* We also use N to limit the set of numbers that can be chosen.
 \*
-\* Number is the set of tuples of (participant, participant),
+\* Number is the set of tuples of (decree number, participant),
 \* ensuring each decree number is unique.
 Number == Participant \X Participant
 
@@ -46,7 +46,7 @@ Message == [type: {"NextBallot"}, number: Number, src: Participant, dest: Partic
             src: Participant, 
             dest: Participant]
             \cup
-           [type: {"Voted"}, number: Number, value: Number, dest: Participant, src: Participant]
+           [type: {"Voted"}, number: Number, dest: Participant, src: Participant]
             \cup
            [type: {"Success"}, value: Number, dest: Participant]
 
@@ -65,6 +65,7 @@ TypeOk == /\ msgs \subseteq Message
           /\ replied \in [Participant -> SUBSET Participant]
           /\ voted \in [Participant -> SUBSET Participant]
           /\ ledger \in [Participant -> Decree]
+          /\ ballots \in [Participant -> [value: {NoNumber} \cup Number, quorum: SUBSET Participant]]
 
 \* The invariant that all ledgers must contain the same decree(or none).
 CoherenceInv == \A p \in Participant:
@@ -112,6 +113,7 @@ Init == /\ msgs = {}
         /\ replied = [p \in Participant |-> {}]
         /\ voted = [p \in Participant |-> {}]
         /\ ledger = [p \in Participant |-> NoNumber]
+        /\ ballots = [p \in Participant |-> [value |-> NoNumber, quorum |-> {}]]
 
 \* Step 1
 ChooseBallotNumber(p) == /\ lastTried[p][1] < MaxTries
@@ -123,7 +125,7 @@ ChooseBallotNumber(p) == /\ lastTried[p][1] < MaxTries
                               number: {lastTried'[p]},
                               src: {p}, 
                               dest: Participant]
-                         /\ UNCHANGED<<prevVote, nextBal, ledger, lastVote>>
+                         /\ UNCHANGED<<prevVote, nextBal, ledger, lastVote, ballots>>
 
 \* Step 2
 HandleNextBallot(p) == \E msg \in msgs: 
@@ -137,7 +139,7 @@ HandleNextBallot(p) == \E msg \in msgs:
                               vote: {prevVote[p]},
                               src: {p}, 
                               dest: {msg.src}]
-                        /\ UNCHANGED<<lastVote, lastTried, prevVote, replied, ledger, voted>>
+                        /\ UNCHANGED<<lastVote, lastTried, prevVote, replied, ledger, voted, ballots>>
 
 \* Step 3
 HandleLastVote(p) == \E msg \in msgs:   
@@ -149,7 +151,7 @@ HandleLastVote(p) == \E msg \in msgs:
                             IF IsHigherNumber(msg.vote.number, @.number) 
                             THEN msg.vote 
                             ELSE @]
-                        /\ UNCHANGED<<lastTried, prevVote, nextBal, msgs, ledger, voted>>
+                        /\ UNCHANGED<<lastTried, prevVote, nextBal, msgs, ledger, voted, ballots>>
 
 \* Step 3 - continued. 
 \* Separated in two steps for readeability, 
@@ -164,6 +166,10 @@ BeginBallot(p) == LET max[i \in Participant] ==
                             decree == IF maxVote.value = NoNumber THEN lastTried[p] ELSE maxVote.value
                             hasQuorum == Cardinality(replied[p]) > (Cardinality(Participant) \div 2)
                   IN /\ hasQuorum
+                     /\ ballots' = [ballots EXCEPT ![p] = [value |-> decree, quorum |-> replied]]
+                     /\ lastVote' = [lastVote EXCEPT ![p] = 
+                        [pp \in Participant |-> [number |-> NoNumber, value |-> NoNumber]]]
+                     /\ replied' = [replied EXCEPT ![p] = {}]
                      /\ msgs' = msgs \cup 
                         [type: {"BeginBallot"}, 
                             number: {lastTried[p]}, 
@@ -172,8 +178,8 @@ BeginBallot(p) == LET max[i \in Participant] ==
                                 value: {decree}], 
                             src: {p}, 
                             dest: replied[p]]
-                     /\ UNCHANGED<<lastTried, lastVote, prevVote,
-                                    nextBal, replied, ledger, voted>> 
+                     /\ UNCHANGED<<lastTried, prevVote,
+                                    nextBal, ledger, voted>> 
 
 \* Step 4
 HandleBeginBallot(p) == \E msg \in msgs:   
@@ -184,14 +190,13 @@ HandleBeginBallot(p) == \E msg \in msgs:
                             /\ msgs' = msgs \cup 
                                 [type: {"Voted"}, 
                                     number: {msg.number}, 
-                                    value: {msg.value.value}, 
                                     src: {p}, 
                                     dest: {msg.src}]
-                            /\ UNCHANGED<<lastTried, lastVote, nextBal, replied,ledger, voted>> 
+                            /\ UNCHANGED<<lastTried, lastVote, nextBal, replied,ledger, voted, ballots>> 
 
 \* Step 5
 HandleVoted(p) == \E msg \in msgs: 
-                    LET hasQuorum == Cardinality(voted'[p]) > (Cardinality(Participant) \div 2)
+                    LET hasQuorum == ballots[p].quorum = voted'
                     IN  
                     /\ msg.dest = p
                     /\ msg.type = "Voted" 
@@ -199,11 +204,11 @@ HandleVoted(p) == \E msg \in msgs:
                     /\ voted' = [voted EXCEPT ![p] = @ \cup {msg.src}]
                     /\ msgs' = IF hasQuorum
                               THEN msgs \cup 
-                                [type: {"Success"}, value: {msg.value}, dest: voted'[p]] 
+                                [type: {"Success"}, value: {ballots[p].value}, dest: voted'[p]] 
                               ELSE msgs
                     /\ ledger' = [ledger EXCEPT ![p] = 
-                                    IF hasQuorum THEN msg.value ELSE @]
-                    /\ UNCHANGED<<lastTried, lastVote, nextBal, replied, prevVote>>
+                                    IF hasQuorum THEN ballots[p].value ELSE @]
+                    /\ UNCHANGED<<lastTried, lastVote, nextBal, replied, ballots, prevVote>>
 
 \* Step 6
 HandleSuccess(p) == \E msg \in msgs:
@@ -212,7 +217,7 @@ HandleSuccess(p) == \E msg \in msgs:
                         /\ ledger[p] = NoNumber
                         /\ ledger' = [ledger EXCEPT ![p] = msg.value]
                         /\ UNCHANGED<<lastTried, lastVote, nextBal,
-                                        replied, msgs, prevVote, voted>>
+                                        replied, msgs, prevVote, ballots, voted>>
 
 \* The information "kept on a slip of paper", as well as messages, can be lost.
 Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] = 
@@ -222,6 +227,7 @@ Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] =
             \* Drop all except "NextBallot" messages,
             \* since sending those are limited by MaxTries
             /\ msgs' = {m \in msgs: m.type \in {"NextBallot"}}
+            /\ ballots' = [ballots EXCEPT ![p] = [value |-> NoNumber, quorum |-> {}]]
             /\ UNCHANGED<<lastTried, nextBal, prevVote, ledger>>
                                                           
 Next == \/ \E p \in Participant:
