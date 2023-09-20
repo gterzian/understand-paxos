@@ -3,7 +3,7 @@ EXTENDS FiniteSets, Naturals
 VARIABLES lastTried, prevVote, lastVote, replied, nextBal, msgs, ledger, voted, ballots
 CONSTANT N, MaxTries, NoNumber
 ----------------------------------------------------------------------------
-\* Specification of The Basic Protocol of 2.3 in
+\* Specification of The Basic Protocol in
 \* https://lamport.azurewebsites.net/pubs/lamport-paxos.pdf
 
 IsLowerNumber(a, b) == IF a[1] < b[1] THEN TRUE 
@@ -42,11 +42,11 @@ Message == [type: {"NextBallot"}, number: Number, src: Participant, dest: Partic
             \cup
            [type: {"BeginBallot"}, 
             number: Number, 
-            value: [number: {NoNumber} \cup Number, value: {NoNumber} \cup Number], 
+            vote: [number: {NoNumber} \cup Number, value: Number], 
             src: Participant, 
             dest: Participant]
             \cup
-           [type: {"Voted"}, number: Number, dest: Participant, src: Participant]
+           [type: {"Voted"}, number: Number, value: Number, dest: Participant, src: Participant]
             \cup
            [type: {"Success"}, value: Number, dest: Participant]
 
@@ -166,40 +166,45 @@ BeginBallot(p) == LET max[i \in Participant] ==
                             decree == IF maxVote.value = NoNumber THEN lastTried[p] ELSE maxVote.value
                             hasQuorum == Cardinality(replied[p]) > (Cardinality(Participant) \div 2)
                   IN /\ hasQuorum
-                     /\ ballots' = [ballots EXCEPT ![p] = [value |-> decree, quorum |-> replied]]
+                     /\ ledger[p] = NoNumber
+                     /\ ballots' = [ballots EXCEPT ![p] = [value |-> decree, quorum |-> replied[p]]]
                      /\ lastVote' = [lastVote EXCEPT ![p] = 
                         [pp \in Participant |-> [number |-> NoNumber, value |-> NoNumber]]]
                      /\ replied' = [replied EXCEPT ![p] = {}]
+                     /\ voted' = [voted EXCEPT ![p] = {}]
                      /\ msgs' = msgs \cup 
                         [type: {"BeginBallot"}, 
                             number: {lastTried[p]}, 
-                            value: [
+                            vote: [
                                 number: {lastTried[p]}, 
                                 value: {decree}], 
                             src: {p}, 
                             dest: replied[p]]
                      /\ UNCHANGED<<lastTried, prevVote,
-                                    nextBal, ledger, voted>> 
+                                    nextBal, ledger>> 
 
 \* Step 4
 HandleBeginBallot(p) == \E msg \in msgs:   
                             /\ msg.dest = p
                             /\ msg.type = "BeginBallot"
                             /\ msg.number = nextBal[p]
-                            /\ prevVote' = [prevVote EXCEPT ![p] = msg.value]
+                            /\ IsHigherNumber(nextBal[p], prevVote[p].number)
+                            /\ prevVote' = [prevVote EXCEPT ![p] = msg.vote]
                             /\ msgs' = msgs \cup 
                                 [type: {"Voted"}, 
-                                    number: {msg.number}, 
+                                    number: {msg.number},
+                                    value: {msg.vote.value}, 
                                     src: {p}, 
                                     dest: {msg.src}]
                             /\ UNCHANGED<<lastTried, lastVote, nextBal, replied,ledger, voted, ballots>> 
 
 \* Step 5
 HandleVoted(p) == \E msg \in msgs: 
-                    LET hasQuorum == ballots[p].quorum = voted'
+                    LET hasQuorum == ballots[p].quorum = voted'[p]
                     IN  
                     /\ msg.dest = p
                     /\ msg.type = "Voted" 
+                    /\ msg.value = ballots[p].value
                     /\ msg.number = lastTried[p]
                     /\ voted' = [voted EXCEPT ![p] = @ \cup {msg.src}]
                     /\ msgs' = IF hasQuorum
