@@ -26,12 +26,14 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                 let mut synod: Synod = hydrate(doc).unwrap();
                 let our_info = synod.participants.get_mut(participant_id).unwrap();
 
+                // Step 1: ChooseBallotNumber.
                 our_info.last_tried.increment();
 
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &synod).unwrap();
                 tx.commit();
             });
+        } else {
             continue;
         }
 
@@ -39,48 +41,58 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
 
         doc_handle.with_doc_mut(|doc| {
             let mut synod: Synod = hydrate(doc).unwrap();
-            let last_tried = synod
-                .participants
-                .get_mut(participant_id)
-                .unwrap()
-                .last_tried
-                .clone();
+            let participants = synod.participants.clone();
+            let our_info = synod.participants.get_mut(participant_id).unwrap();
 
-            let mut highest_vote = Vote {
-                number: Number(0, participant_id.clone()),
-                value: Value(0),
-            };
-            let mut count = 0;
-            let mut has_voted = 0;
-            for (_id, info) in synod.participants.iter() {
-                if info.next_bal == last_tried {
-                    count += 1;
+            if let Some(ref mut ballot) = our_info.ballot {
+                // Step 5: HandleVoted.
+                for (id, info) in participants.iter() {
+                    if !ballot.quorum.contains_key(id) {
+                        continue;
+                    }
                     if let Some(ref vote) = info.prev_vote {
-                        if vote.number > highest_vote.number {
-                            highest_vote = vote.clone();
-                        }
-                        if vote.number == last_tried {
-                            has_voted += 1;
+                        if vote.number == ballot.number && vote.value == ballot.value {
+                            ballot.quorum.insert(id.clone(), true);
                         }
                     }
                 }
-            }
-
-            if count > synod.participants.len() / 2 {
-                let value = if let Value(0) = highest_vote.value {
-                    let mut rng = rand::thread_rng();
-                    Value(rng.gen())
-                } else {
-                    highest_vote.value
-                };
-                let ballot = Ballot {
-                    number: last_tried,
-                    value,
-                };
-                if has_voted > synod.participants.len() / 2 {
-                    synod.ledger.insert(participant_id.clone(), ballot.value);
-                } else {
-                    synod.ballots.push(ballot);
+                let vote_count = ballot.quorum.iter().filter(|(_, voted)| **voted).count();
+                if vote_count > participants.len() / 2 {
+                    synod
+                        .ledger
+                        .insert(participant_id.clone(), ballot.value.clone());
+                }
+            } else {
+                // Step 3: HandleLastVote.
+                let mut replied: HashMap<String, Option<Vote>> = Default::default();
+                for (id, info) in participants.iter() {
+                    if info.next_bal == our_info.last_tried {
+                        replied.insert(id.clone(), info.prev_vote.clone());
+                    }
+                }
+                if replied.len() > participants.len() / 2 {
+                    // Step 3 (cont'd): BeginBallot.
+                    let mut highest_vote = Vote {
+                        number: Number(0, participant_id.clone()),
+                        value: Value(0),
+                    };
+                    for vote in replied.iter().filter_map(|(_, v)| v.clone()) {
+                        if vote.number > highest_vote.number {
+                            highest_vote = vote.clone();
+                        }
+                    }
+                    let value = if let Value(0) = highest_vote.value {
+                        let mut rng = rand::thread_rng();
+                        Value(rng.gen())
+                    } else {
+                        highest_vote.value
+                    };
+                    let ballot = Ballot {
+                        number: our_info.last_tried.clone(),
+                        value,
+                        quorum: replied.into_iter().map(|(id, _)| (id, false)).collect(),
+                    };
+                    our_info.ballot = Some(ballot);
                 }
             }
 
@@ -104,19 +116,35 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
 
             for (_id, info) in synod.participants.iter() {
                 if info.last_tried > next_bal {
+                    // Step 2: HandleNextBallot.
                     next_bal = info.last_tried.clone();
                 }
             }
 
-            let our_info = synod.participants.get_mut(participant_id).unwrap();
-
-            our_info.next_bal = next_bal;
-
-            for ballot in synod.ballots.iter() {
-                if ballot.number == our_info.next_bal {
-                    our_info.prev_vote = Some(ballot.clone().into());
+            let mut prev_vote = synod
+                .participants
+                .get_mut(participant_id)
+                .unwrap()
+                .prev_vote
+                .clone();
+            for (_id, info) in synod.participants.iter() {
+                if let Some(ref ballot) = info.ballot {
+                    // Step 4: HandleBeginBallot.
+                    if ballot.number == next_bal {
+                        if let Some(ref vote) = prev_vote {
+                            if ballot.number > vote.number {
+                                prev_vote = Some(ballot.clone().into());
+                            }
+                        } else {
+                            prev_vote = Some(ballot.clone().into());
+                        }
+                    }
                 }
             }
+
+            let our_info = synod.participants.get_mut(participant_id).unwrap();
+            our_info.next_bal = next_bal;
+            our_info.prev_vote = prev_vote;
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &synod).unwrap();
@@ -133,6 +161,8 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
             let mut values: HashSet<Value> = synod.ledger.values().cloned().collect();
             if !values.is_empty() {
                 assert_eq!(values.len(), 1);
+
+                // Step 6: HandleSuccess.
                 synod
                     .ledger
                     .insert(participant_id.clone(), values.drain().next().unwrap());
@@ -188,23 +218,24 @@ impl From<Ballot> for Vote {
     }
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Reconcile, Hydrate)]
 struct Ballot {
     number: Number,
     value: Value,
+    quorum: HashMap<String, bool>,
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[derive(Debug, Clone, Reconcile, Hydrate)]
 struct Participant {
     last_tried: Number,
     next_bal: Number,
     prev_vote: Option<Vote>,
+    ballot: Option<Ballot>,
 }
 
-#[derive(Default, Debug, Clone, Reconcile, Hydrate, PartialEq)]
+#[derive(Default, Debug, Clone, Reconcile, Hydrate)]
 struct Synod {
     pub participants: HashMap<String, Participant>,
-    pub ballots: Vec<Ballot>,
     pub ledger: HashMap<String, Value>,
 }
 
@@ -341,6 +372,7 @@ async fn main() {
                 last_tried: Number(0, participant_id.clone()),
                 next_bal: Number(0, participant_id.clone()),
                 prev_vote: None,
+                ballot: None,
             };
             synod
                 .participants
