@@ -33,10 +33,8 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                 reconcile(&mut tx, &synod).unwrap();
                 tx.commit();
             });
-        } else {
-            continue;
         }
-
+        
         doc_handle.changed().await.unwrap();
 
         doc_handle.with_doc_mut(|doc| {
