@@ -20,6 +20,17 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
 }
 
 async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String) {
+    doc_handle.with_doc_mut(|doc| {
+        let mut synod: Synod = hydrate(doc).unwrap();
+        let our_info = synod.participants.get_mut(participant_id).unwrap();
+
+        // Step 1: ChooseBallotNumber.
+        our_info.last_tried.increment();
+
+        let mut tx = doc.transaction();
+        reconcile(&mut tx, &synod).unwrap();
+        tx.commit();
+    });
     loop {
         if rand::random() {
             doc_handle.with_doc_mut(|doc| {
