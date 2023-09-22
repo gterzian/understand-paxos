@@ -90,22 +90,16 @@ PaxosInv ==
            \/ ledger[p] \in Number => /\ majorityVoted
                                       /\ higherVoteSameValue       
         /\ \A pp \in sameBallot:
-           LET 
-            otherValueInQuorum == {i \in sameBallot: 
-                       \/ prevVote[i].number = nextBal[p] 
-                       \/ prevVote[i].value = prevVote[pp].value }
-            sameValueInQuorum == {i \in sameBallot: 
-                       \/ prevVote[i].number = nextBal[p] 
-                       \/ prevVote[i].value = prevVote[p].value }
-           IN
-           \/ /\ IsLowerNumber(prevVote[pp].number, prevVote[p].number) 
-                  => Cardinality(otherValueInQuorum) = 0
-              /\ prevVote[pp] # prevVote[p]
-           \/ /\ IsHigherNumber(prevVote[pp].number, prevVote[p].number) 
-                  => Cardinality(sameValueInQuorum) = 0
-              /\ prevVote[pp] # prevVote[p]
-           \/ /\ prevVote[pp] = prevVote[p]
-           \/ /\prevVote[pp].number = NoNumber                                  
+           \/ IsLowerNumber(prevVote[pp].number, prevVote[p].number) 
+                  => \A i \in sameBallot: 
+                        prevVote[i].number = nextBal[p] 
+                                => prevVote[i].value # prevVote[pp].value
+           \/ IsHigherNumber(prevVote[pp].number, prevVote[p].number) 
+                  => \A i \in sameBallot: 
+                        prevVote[i].number = nextBal[p] 
+                                => prevVote[i].value # prevVote[p].value
+           \/ prevVote[pp] = prevVote[p]
+           \/ prevVote[pp].number = NoNumber                                  
 -------------------------------------------------------------------------------------------------------    
     
 Init == /\ msgs = {}
@@ -233,9 +227,7 @@ Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] =
                 [pp \in Participant |-> [number |-> NoNumber, value |-> NoNumber]]]
             /\ replied' = [replied EXCEPT ![p] = {}]
             /\ voted' = [voted EXCEPT ![p] = {}]
-            \* Drop all except "NextBallot" messages,
-            \* since sending those are limited by MaxTries
-            /\ msgs' = {m \in msgs: m.type \in {"NextBallot"}}
+            /\ msgs' = {m \in msgs: m.dest # p}
             /\ ballots' = [ballots EXCEPT ![p] = [value |-> NoNumber, quorum |-> {}]]
             /\ UNCHANGED<<lastTried, nextBal, prevVote, ledger>>
                                                           
