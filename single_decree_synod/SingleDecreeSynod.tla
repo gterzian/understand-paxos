@@ -79,12 +79,16 @@ CoherenceInv == \A p \in Participant:
 PaxosInv == 
      \A p \in Participant:
         LET 
+            higherVoteSameValue == \A i \in Participant: 
+                (IsHigherNumber(prevVote[i].number, nextBal[p])) 
+                    => prevVote[i].value = ledger[p]
             sameBallot == {i \in Participant: nextBal[i] = nextBal[p]}
             majorityVoted == Cardinality({i \in Participant: prevVote[i].value = ledger[p]}) 
                 > (Cardinality(Participant) \div 2)
         IN
         /\ \/ ledger[p] = NoNumber
-           \/ ledger[p] \in Number => majorityVoted        
+           \/ ledger[p] \in Number => /\ majorityVoted
+                                      /\ higherVoteSameValue       
         /\ \A pp \in sameBallot:
            LET 
             otherValueInQuorum == {i \in sameBallot: 
