@@ -9,11 +9,11 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::time::{sleep, Duration};
+use tempfile::TempDir;
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
@@ -37,6 +37,11 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
             doc_handle.with_doc_mut(|doc| {
                 let mut synod: Synod = hydrate(doc).unwrap();
                 let our_info = synod.participants.get_mut(participant_id).unwrap();
+                
+                // Stop trying once we've written a value to our ledger.
+                if synod.ledger.contains_key(participant_id) {
+                    return;
+                }
 
                 // Step 1: ChooseBallotNumber.
                 our_info.last_tried.increment();
@@ -55,23 +60,28 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
             let our_info = synod.participants.get_mut(participant_id).unwrap();
 
             if let Some(ref mut ballot) = our_info.ballot {
-                // Step 5: HandleVoted.
-                for (id, info) in participants.iter() {
-                    if !ballot.quorum.contains_key(id) {
-                        continue;
-                    }
-                    if let Some(ref vote) = info.prev_vote {
-                        if vote.number == ballot.number && vote.value == ballot.value {
-                            ballot.quorum.insert(id.clone(), true);
+                if ballot.number < our_info.last_tried {
+                    // Forget about older ballots.
+                    our_info.ballot = None;
+                } else {
+                    // Step 5: HandleVoted.
+                    for (id, info) in participants.iter() {
+                        if !ballot.quorum.contains_key(id) {
+                            continue;
+                        }
+                        if let Some(ref vote) = info.prev_vote {
+                            if vote.number == ballot.number && vote.value == ballot.value {
+                                ballot.quorum.insert(id.clone(), true);
+                            }
                         }
                     }
-                }
-                let vote_count = ballot.quorum.iter().filter(|(_, voted)| **voted).count();
-                if vote_count > participants.len() / 2 {
-                    synod
-                        .ledger
-                        .insert(participant_id.clone(), ballot.value.clone());
-                }
+                    let vote_count = ballot.quorum.iter().filter(|(_, voted)| **voted).count();
+                    if vote_count > participants.len() / 2 {
+                        synod
+                            .ledger
+                            .insert(participant_id.clone(), ballot.value.clone());
+                    }
+                }        
             } else {
                 // Step 3: HandleLastVote.
                 let mut replied: HashMap<String, Option<Vote>> = Default::default();
@@ -331,10 +341,12 @@ async fn main() {
     let our_tcp_addr = format!("127.0.0.1:234{}", participant_id);
 
     // Create a repo.
+    let temp_dir = TempDir::new().unwrap();
+    let store = FsStore::open(temp_dir.path()).unwrap();
     let repo = Repo::new(
         None,
         Box::new(BlockingFsStorage(Arc::new(Mutex::new(
-            FsStore::open(Path::new("/tmp/")).unwrap(),
+            store
         )))),
     );
     let repo_handle = repo.run();
