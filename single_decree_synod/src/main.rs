@@ -32,6 +32,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
         tx.commit();
     });
     loop {
+        // Randomly start a new try.
         if rand::random() {
             doc_handle.with_doc_mut(|doc| {
                 let mut synod: Synod = hydrate(doc).unwrap();
