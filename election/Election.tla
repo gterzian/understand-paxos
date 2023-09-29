@@ -83,5 +83,5 @@ Next == \E p \in Participant: \/ BecomeLeader(p)
 
 Spec  ==  Init  /\  [][Next]_<<epochs, leaders>>
 
-THEOREM  Spec  =>  [](TypeOk /\ LeaderInv)
+THEOREM  Spec  =>  [](TypeOk /\ SingleTrueLeader /\ SingleLeaderSync)
 =============================================================================
