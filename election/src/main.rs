@@ -1,4 +1,3 @@
-use automerge_repo::fs_store::FsStore;
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
 use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 use axum::extract::State;
@@ -7,56 +6,85 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::time::{sleep, Duration};
- use std::iter::zip;
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
 }
 
-fn leader_algorithm(election: &mut Election, participant_id: &String) {
-    let (mut our_epoch, mut our_leadership) = {
+fn leader_algorithm(election: &mut Election, participant_id: &String) -> ElectionOutcome {
+    let (our_epoch, our_past_leadership) = {
         let our_info = election.participants.get_mut(participant_id).unwrap();
-        (our_info.epoch.clone(), our_info.is_leader.clone())
+        (our_info.epoch, our_info.is_leader)
     };
-    
-    our_leadership = true;
 
-    for (id, info) in election.participants.iter() {
+    let mut our_new_leadership = true;
+
+    for (id, info) in election.participants.iter_mut() {
         if id == participant_id {
             continue;
         }
-        
+
         if participant_id > id {
             if info.epoch > our_epoch && info.is_leader {
-                our_leadership = false;
+                our_new_leadership = false;
             }
-        } else {
-            if info.epoch >= our_epoch {
-                our_leadership = false;
-            }    
+        } else if info.epoch >= our_epoch {
+            our_new_leadership = false;
         }
     }
+
+    let outcome = if !our_past_leadership && our_new_leadership {
+        ElectionOutcome::NewlyElected
+    } else if our_past_leadership && !our_new_leadership {
+        ElectionOutcome::SteppedDown
+    } else {
+        ElectionOutcome::Unchanged
+    };
+
+    let max_epoch = election
+        .participants
+        .values()
+        .map(|info| info.epoch)
+        .max()
+        .unwrap();
+    let our_info = election.participants.get_mut(participant_id).unwrap();
+    our_info.epoch = if let ElectionOutcome::NewlyElected = outcome {
+        max_epoch + 1
+    } else {
+        max_epoch
+    };
+    our_info.is_leader = our_new_leadership;
+    outcome
 }
 
 async fn run_leader_algorithm(doc_handle: DocHandle, participant_id: String) {
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut election: Election = hydrate(doc).unwrap();
-            
-            leader_algorithm(&mut election, &participant_id);
-            
-            let confirmed_leaders = election.participants.values().filter(|info| info.is_leader).count();
-            assert_eq!(confirmed_leaders, 1);
-            
-            // Update epoch to max.
-            let max_epoch = election.participants.values().map(|info| info.epoch).max().unwrap();
-            let our_info = election.participants.get_mut(&participant_id).unwrap();
-            our_info.epoch = max_epoch;
+
+            let outcome = leader_algorithm(&mut election, &participant_id);
+
+            println!("State of the Union: {:?}", election);
+
+            if let ElectionOutcome::NewlyElected = outcome {
+                for (id, info) in election.participants.iter() {
+                    if id == &participant_id {
+                        continue;
+                    }
+                    if info.is_leader {
+                        let simulated_outcome = leader_algorithm(&mut election.clone(), id);
+                        assert_eq!(simulated_outcome, ElectionOutcome::SteppedDown);
+                    } else {
+                        let simulated_outcome = leader_algorithm(&mut election.clone(), id);
+                        assert_eq!(simulated_outcome, ElectionOutcome::Unchanged);    
+                    }
+                }
+            }
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &election).unwrap();
@@ -68,27 +96,12 @@ async fn run_leader_algorithm(doc_handle: DocHandle, participant_id: String) {
 
 async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) {
     loop {
-        sleep(Duration::from_millis(1000)).await;
-        doc_handle.with_doc_mut(|doc| {
-            let mut election: Election = hydrate(doc).unwrap();
-            
-            let our_info = election.participants.get_mut(&participant_id).unwrap();
-            our_info.epoch += 1;
-
-            let mut tx = doc.transaction();
-            reconcile(&mut tx, &election).unwrap();
-            tx.commit();
-        });
-    }
-}
-
-async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
-    loop {
         sleep(Duration::from_millis(10000)).await;
         doc_handle.with_doc_mut(|doc| {
             let mut election: Election = hydrate(doc).unwrap();
-            
-            let our_info = election.participants.entry(participant_id.clone()).and_modify(|info| *info = Default::default());
+
+            let our_info = election.participants.get_mut(&participant_id).unwrap();
+            our_info.epoch += 1;
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &election).unwrap();
@@ -108,6 +121,13 @@ struct Args {
 
 struct AppState {
     doc_handle: DocHandle,
+}
+
+#[derive(Debug, PartialEq)]
+enum ElectionOutcome {
+    NewlyElected,
+    SteppedDown,
+    Unchanged,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Default)]
@@ -266,13 +286,7 @@ async fn main() {
     handle.spawn(async move {
         run_heartbeat_algorithm(doc_handle_clone, id).await;
     });
-    
-    let doc_handle_clone = doc_handle.clone();
-    let id = participant_id.clone();
-    handle.spawn(async move {
-        run_crash_algorithm(doc_handle_clone, id).await;
-    });
-    
+
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     handle.spawn(async move {

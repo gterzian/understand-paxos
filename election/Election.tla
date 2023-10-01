@@ -30,7 +30,7 @@ SingleLeaderSync == \A p \in Participant:
                             /\ (HasSyncedWith(p, pp) /\ leaders[pp][pp]) => pp = p  
                             /\ (HasSyncedWith(p, pp) /\ pp # p) => WouldAcceptOp(p, pp) 
 
-\* Invariant: only one true leader.
+\* Invariant: only one leader.
 SingleTrueLeader == Cardinality(confirmed) \in {0,1}
 -----------------------------------------------------------------------------
 
