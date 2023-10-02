@@ -10,10 +10,10 @@ use futures::FutureExt;
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::time::{sleep, Duration};
-use tempfile::TempDir;
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
@@ -37,7 +37,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
             doc_handle.with_doc_mut(|doc| {
                 let mut synod: Synod = hydrate(doc).unwrap();
                 let our_info = synod.participants.get_mut(participant_id).unwrap();
-                
+
                 // Stop trying once we've written a value to our ledger.
                 if synod.ledger.contains_key(participant_id) {
                     return;
@@ -51,7 +51,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                 tx.commit();
             });
         }
-        
+
         doc_handle.changed().await.unwrap();
 
         doc_handle.with_doc_mut(|doc| {
@@ -81,7 +81,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                             .ledger
                             .insert(participant_id.clone(), ballot.value.clone());
                     }
-                }        
+                }
             } else {
                 // Step 3: HandleLastVote.
                 let mut replied: HashMap<String, Option<Vote>> = Default::default();
@@ -345,9 +345,7 @@ async fn main() {
     let store = FsStore::open(temp_dir.path()).unwrap();
     let repo = Repo::new(
         None,
-        Box::new(BlockingFsStorage(Arc::new(Mutex::new(
-            store
-        )))),
+        Box::new(BlockingFsStorage(Arc::new(Mutex::new(store)))),
     );
     let repo_handle = repo.run();
 

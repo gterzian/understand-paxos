@@ -11,3 +11,14 @@
    - `cargo run -p single_decree_synod --release --  --participant-id "2"`
    - `cargo run -p single_decree_synod --release --  --participant-id "3"`
 3. Watch the peers reach consensus on a single value.
+
+## Election
+
+[Specifying](/election/Election.tla), and [implementing](election/src/main.rs), leader election for use with a Paxos implementation.
+
+1. Start the bootstap peer:
+   - `cargo run -p election --release -- --bootstrap --participant-id "1"`
+2. Start two other peers:
+   - `cargo run -p election --release --  --participant-id "2"`
+   - `cargo run -p election --release --  --participant-id "3"`
+3. Watch the peers elect a single "true" leader at all times.
