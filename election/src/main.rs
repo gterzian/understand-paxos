@@ -101,7 +101,7 @@ async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) 
             let mut election: Election = hydrate(doc).unwrap();
 
             let our_info = election.participants.get_mut(&participant_id).unwrap();
-            our_info.epoch += 1;
+            our_info.epoch = our_info.epoch.checked_add(1).unwrap_or(0);
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &election).unwrap();
