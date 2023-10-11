@@ -3,4 +3,5 @@
 members = [
     "single_decree_synod",
     "election",
+    "multi_decree",
 ]
