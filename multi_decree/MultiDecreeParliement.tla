@@ -26,14 +26,17 @@ Decree ==  Number \cup {OliveDay}
 ASSUME NoNumber \notin Number
 ASSUME OliveDay \notin Number
 
-Message == [type: {"NextBallot"}, number: Number, src: Participant, dest: Participant]  
+Message == [type: {"NextBallot"}, 
+            number: Number, 
+            src: Participant, 
+            dest: Participant]  
             \cup
            [type: {"LastVote"}, 
-               number: Number, 
-               votes: [Instance -> [number: {NoNumber} \cup Number, 
+            number: Number, 
+            votes: [Instance -> [number: {NoNumber} \cup Number, 
                                     value: {NoNumber} \cup Number]],
-               src: Participant, 
-               dest: Participant]  
+            src: Participant, 
+            dest: Participant]  
             \cup
            [type: {"BeginBallot"},
             instance: Instance, 
@@ -44,11 +47,11 @@ Message == [type: {"NextBallot"}, number: Number, src: Participant, dest: Partic
             dest: Participant] 
             \cup
            [type: {"Voted"}, 
-                instance: Instance, 
-                number: Number, 
-                value: Decree, 
-                dest: Participant, 
-                src: Participant]
+            instance: Instance, 
+            number: Number, 
+            value: Decree, 
+            dest: Participant, 
+            src: Participant]
             \cup
            [type: {"Success"}, 
             src: Participant, 
@@ -77,9 +80,15 @@ TypeOk == /\ leader \in Participant
 \* The invariant that, for a given instance, all ledgers must contain the same decree(or none).
 CoherenceInv == \A p \in Participant: \E i \in Instance:
                     \/ ledger[p][i] = NoNumber
-                    \/ ledger[p][i] \in Number => \A other \in Participant:
+                    \/ ledger[p][i] \in Decree => \A other \in Participant:
                         \/ ledger[p][i] = ledger[other][i]
-                        \/ ledger[other][i] = NoNumber 
+                        \/ ledger[other][i] = NoNumber
+
+\* When all participants have reached their max number of tries,
+\* all instances should have chosen a value.
+ValuesWrittenInv == Cardinality({\A p \in Participant: lastTried[p][1] = MaxTries }) = N =>  
+                        \A p \in Participant: \A i \in Instance:
+                            /\ ledger[p][i] \in Decree
 ----------------------------------------------------------------------------
 
 Init == /\ leader = CHOOSE x \in Participant: TRUE
@@ -100,8 +109,9 @@ Init == /\ leader = CHOOSE x \in Participant: TRUE
         /\ ballots = [p \in Participant |-> 
             [i \in Instance |-> [value |-> NoNumber, quorum |-> {}]]]
 
-\* Step 1
-ChooseBallotNumber(p) == /\ p = leader
+\* Step 1, with new leader.
+ChooseBallotNumber(p) == /\ p # leader
+                         /\ leader' = p
                          /\ lastTried[p][1] < MaxTries
                          /\ lastTried' = [lastTried EXCEPT ![p] = <<@[1] + 1, p>>]
                          /\ replied' = [replied EXCEPT ![p] = {}]
@@ -110,7 +120,7 @@ ChooseBallotNumber(p) == /\ p = leader
                               number: {lastTried'[p]},
                               src: {p}, 
                               dest: Participant]
-                         /\ UNCHANGED<<leader, prevVote, nextBal, 
+                         /\ UNCHANGED<<prevVote, nextBal, 
                                 voted, ledger, lastVote, ballots>>
 
 \* Step 2
@@ -129,7 +139,6 @@ HandleNextBallot(p, msg) ==
                        /\ UNCHANGED<<leader, lastVote, lastTried, prevVote, 
                                 replied, ledger, voted, ballots>>
                         
-
 \* Step 3
 HandleLastVote(p, msg) == 
                      /\ msg.type = "LastVote"
@@ -142,7 +151,6 @@ HandleLastVote(p, msg) ==
                      /\ UNCHANGED<<leader, lastTried, prevVote, nextBal, 
                             msgs, ledger, voted, ballots>>
                         
-
 \* Step 3 - continued. 
 \* Separated in two steps for readeability, 
 \* with no impact on correctness.
@@ -199,7 +207,6 @@ HandleBeginBallot(p, i, msg) ==
                             /\ UNCHANGED<<leader, lastTried, lastVote, 
                                 nextBal, replied,ledger, voted, ballots>> 
                             
-
 \* Step 5
 HandleVoted(p, i, msg) == LET hasQuorum == ballots[p][i].quorum = voted'[p][i]
                           IN 
@@ -223,7 +230,6 @@ HandleVoted(p, i, msg) == LET hasQuorum == ballots[p][i].quorum = voted'[p][i]
                     /\ UNCHANGED<<leader, lastTried, lastVote, nextBal, 
                         replied, ballots, prevVote>>
                     
-
 \* Step 6
 HandleSuccess(p, i, msg) == /\ msg.type = "Success"
                             /\ msg.instance = i
@@ -232,13 +238,7 @@ HandleSuccess(p, i, msg) == /\ msg.type = "Success"
                             /\ ledger[p][i] = NoNumber
                             /\ ledger' = [ledger EXCEPT ![p][i] = msg.value]
                             /\ UNCHANGED<<leader, lastTried, lastVote, nextBal,
-                                        replied, msgs, prevVote, ballots, voted>>
-                        
-
-ChangeLeader(p) == /\ p # leader
-                   /\ leader' = p
-                   /\ UNCHANGED<<lastTried, prevVote, lastVote, 
-                        replied, nextBal, msgs, ledger, voted, ballots>>
+                                        replied, msgs, prevVote, ballots, voted>>                    
 
 \* The information "kept on a slip of paper", as well as messages, can be lost.
 Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] = 
@@ -254,7 +254,6 @@ Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] =
                                                           
 Next == \E p \in Participant: \E i \in Instance:
            \/ Crash(p)
-           \/ ChangeLeader(p)
            \/ ChooseBallotNumber(p)
            \/ \E msg \in msgs:
                    \/ HandleNextBallot(p, msg)
@@ -270,5 +269,5 @@ Spec  ==  Init  /\  [][Next]_<<leader, lastTried, prevVote, lastVote,
                                     ledger, voted, ballots>>
 
 ============================================================================
-THEOREM  Spec  =>  [](TypeOk /\ CoherenceInv)
+THEOREM  Spec  =>  [](TypeOk /\ CoherenceInv /\ ValuesWrittenInv)
 ============================================================================
