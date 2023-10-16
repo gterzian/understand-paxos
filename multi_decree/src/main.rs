@@ -483,10 +483,8 @@ async fn request_increment(
             };
             let url = format!("http://{}/incr", addr);
             let res = client.put(url).send().await;
-            //println!("Incr res: {:?}", res);
             if let Ok(new) = res {
                 let json_res = new.json().await;
-                //println!("Incr json: {:?}", json_res);
                 if let Ok(Some(new)) = json_res {
                     println!("Got new increment: {:?}, versus old one: {:?}", new, last);
                     assert!(new > last);
@@ -508,10 +506,8 @@ async fn request_read(http_addrs: Vec<String>, mut shutdown: tokio::sync::watch:
             };
             let url = format!("http://{}/read", addr);
             let res = client.get(url).send().await;
-            //println!("Read res: {:?}", res);
             if let Ok(new) = res {
                 let json_res = new.json().await;
-                //println!("Read json: {:?}", json_res);
                 if let Ok(Some(new)) = json_res {
                     println!("Got new read: {:?}, versus old one: {:?}", new, last);
                     assert!(new >= last);
