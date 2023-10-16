@@ -7,7 +7,6 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -121,7 +120,7 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> Elec
 }
 
 fn execute_state_machine(
-    ballot_number_to_client_command: &mut Vec<Option<oneshot::Sender<Option<Value>>>>,
+    ballot_number_to_client_command: &mut [Option<oneshot::Sender<Option<Value>>>],
     log: Vec<Option<Ballot>>,
 ) {
     let mut start = 0;
@@ -155,16 +154,15 @@ async fn run_proposal_algorithm(
     let mut pending_client_commands: VecDeque<(ClientCommand, oneshot::Sender<Option<Value>>)> =
         Default::default();
     let mut ballot_number_to_client_command: Vec<Option<oneshot::Sender<Option<Value>>>> = vec![];
-    for index in 0..MAX {
+    for _ in 0..MAX {
         ballot_number_to_client_command.push(None);
     }
     loop {
-        sleep(Duration::from_millis(1000)).await;
-        let election_outcome = doc_handle.with_doc_mut(|doc| {
+        doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
             // Run election
-            let outcome = leader_algorithm(&mut multi_decree, &participant_id);
+            let outcome = leader_algorithm(&mut multi_decree, participant_id);
             if let ElectionOutcome::NewlyElected = outcome {
                 println!("Elected");
                 for (id, info) in multi_decree.participants.iter() {
@@ -187,14 +185,13 @@ async fn run_proposal_algorithm(
                 our_info.last_tried.increment();
             } else if let ElectionOutcome::SteppedDown = outcome {
                 println!("stepping down");
-                // Reset the client command state.
+                // Reset the client command state,
+                // send back None to all pending commands.
                 pending_client_commands.drain(..).for_each(|(_, chan)| {
-                    // Send back None to all pending commands.
                     chan.send(None).unwrap();
                 });
                 for chan in ballot_number_to_client_command.iter_mut() {
                     if let Some(chan) = chan.take() {
-                        // Send back None to all pending commands.
                         chan.send(None).unwrap();
                     }
                 }
@@ -214,6 +211,7 @@ async fn run_proposal_algorithm(
 
             if our_info.is_leader && our_info.log.iter().filter(|i| i.is_some()).count() < MAX {
                 for index in 0..MAX {
+                    // If we already have a value in the log.
                     if our_info.log.get(index).unwrap().is_some() {
                         continue;
                     }
@@ -266,7 +264,7 @@ async fn run_proposal_algorithm(
                             }
 
                             let number = our_info.last_tried.clone();
-                            let value = if let None = highest_vote.value {
+                            let value = if highest_vote.value.is_none() {
                                 let highest_entry = our_info
                                     .log
                                     .iter()
@@ -277,10 +275,9 @@ async fn run_proposal_algorithm(
                                 println!("Index: {:?}, highest entry: {:?}", index, highest_entry);
                                 if index < highest_entry {
                                     // Filling in gaps
-                                    println!("Filling gap");
                                     ClientCommand::NoOp
                                 } else {
-                                    // Assigning a client command.
+                                    // Assigning a client command as the value to be voted on.
                                     if let Some((cmd, chan)) = pending_client_commands.pop_front() {
                                         ballot_number_to_client_command[index] = Some(chan);
                                         cmd
@@ -294,10 +291,10 @@ async fn run_proposal_algorithm(
                             let ballot = Ballot {
                                 number,
                                 value,
-                                quorum: replied.into_iter().map(|(id, _)| (id, false)).collect(),
+                                quorum: replied.into_keys().map(|id| (id, false)).collect(),
                             };
                             our_info.ballot[index] = Some(ballot);
-                            break;
+                            //break;
                         }
                     }
                 }
@@ -305,7 +302,6 @@ async fn run_proposal_algorithm(
             let mut tx = doc.transaction();
             reconcile(&mut tx, &multi_decree).unwrap();
             tx.commit();
-            outcome
         });
         tokio::select! {
             cmd = command_receiver.recv() => {
@@ -381,8 +377,8 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
 
             let logs: Vec<Vec<Option<Ballot>>> = multi_decree
                 .participants
-                .iter()
-                .map(|(_, info)| info.log.clone())
+                .values()
+                .map(|info| info.log.clone())
                 .collect();
 
             let our_info = multi_decree.participants.get_mut(&participant_id).unwrap();
@@ -409,7 +405,7 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
 
 async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) {
     loop {
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(5000)).await;
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -433,9 +429,16 @@ async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
             if our_info.is_leader && rand::random() {
                 our_info.epoch = 0;
                 our_info.ballot = vec![None; MAX];
-            }
+                println!("Crash start");
 
-            println!("Crashed");
+                use std::{thread, time};
+
+                let ten_secs = time::Duration::from_millis(10000);
+
+                thread::sleep(ten_secs);
+
+                println!("Re-starting");
+            }
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &multi_decree).unwrap();
@@ -444,7 +447,7 @@ async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
     }
 }
 
-async fn request_increment(doc_handle: DocHandle, http_addrs: Vec<String>) {
+async fn request_increment(http_addrs: Vec<String>) {
     let client = reqwest::Client::new();
     let mut last = 0;
     loop {
@@ -466,7 +469,7 @@ async fn request_increment(doc_handle: DocHandle, http_addrs: Vec<String>) {
     }
 }
 
-async fn request_read(doc_handle: DocHandle, http_addrs: Vec<String>) {
+async fn request_read(http_addrs: Vec<String>) {
     let client = reqwest::Client::new();
     let mut last = 0;
     loop {
@@ -776,17 +779,15 @@ async fn main() {
         run_learner_algorithm(doc_handle_clone, id).await;
     });
 
-    let doc_handle_clone = doc_handle.clone();
     let http_addrs_clone = http_addrs.clone();
     handle.spawn(async move {
         // Continuously request new increments.
-        request_increment(doc_handle_clone, http_addrs_clone).await;
+        request_increment(http_addrs_clone).await;
     });
 
-    let doc_handle_clone = doc_handle.clone();
     handle.spawn(async move {
         // Continuously request new reads.
-        request_read(doc_handle_clone, http_addrs).await;
+        request_read(http_addrs).await;
     });
 
     handle.spawn(async move {
