@@ -15,6 +15,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 
 const MAX: usize = 1000;
@@ -40,12 +41,8 @@ async fn read(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
     }
 
     let (tx, rx) = oneshot::channel();
-    state
-        .command_sender
-        .send((ClientCommand::Read, tx))
-        .await
-        .unwrap();
-    Json(rx.await.unwrap())
+    let _ = state.command_sender.send((ClientCommand::Read, tx)).await;
+    Json(rx.await.unwrap_or(None))
 }
 
 async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
@@ -65,12 +62,8 @@ async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
     }
 
     let (tx, rx) = oneshot::channel();
-    state
-        .command_sender
-        .send((ClientCommand::Incr, tx))
-        .await
-        .unwrap();
-    Json(rx.await.unwrap())
+    let _ = state.command_sender.send((ClientCommand::Incr, tx)).await;
+    Json(rx.await.unwrap_or(None))
 }
 
 fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> ElectionOutcome {
@@ -87,7 +80,7 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> Elec
         }
 
         if participant_id > id {
-            if info.epoch > our_epoch && info.is_leader {
+            if info.epoch >= our_epoch && info.is_leader {
                 our_new_leadership = false;
             }
         } else if info.epoch >= our_epoch {
@@ -150,6 +143,7 @@ async fn run_proposal_algorithm(
     doc_handle: &DocHandle,
     participant_id: &String,
     mut command_receiver: Receiver<(ClientCommand, oneshot::Sender<Option<Value>>)>,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     let mut pending_client_commands: VecDeque<(ClientCommand, oneshot::Sender<Option<Value>>)> =
         Default::default();
@@ -310,12 +304,17 @@ async fn run_proposal_algorithm(
                         return;
                 }
             }
-            _ = doc_handle.changed() => {}
+            _ = doc_handle.changed() => {},
+            _ = shutdown.changed() => return,
         };
     }
 }
 
-async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) {
+async fn run_acceptor_algorithm(
+    doc_handle: DocHandle,
+    participant_id: &String,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
@@ -365,11 +364,18 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
             reconcile(&mut tx, &multi_decree).unwrap();
             tx.commit();
         });
-        doc_handle.changed().await.unwrap();
+        tokio::select! {
+            _ = doc_handle.changed() => {},
+            _ = shutdown.changed() => return,
+        };
     }
 }
 
-async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
+async fn run_learner_algorithm(
+    doc_handle: DocHandle,
+    participant_id: String,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
@@ -398,13 +404,19 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
             reconcile(&mut tx, &multi_decree).unwrap();
             tx.commit();
         });
-        doc_handle.changed().await.unwrap();
+        tokio::select! {
+            _ = doc_handle.changed() => {},
+            _ = shutdown.changed() => return,
+        };
     }
 }
 
-async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) {
+async fn run_heartbeat_algorithm(
+    doc_handle: DocHandle,
+    participant_id: String,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
     loop {
-        sleep(Duration::from_millis(5000)).await;
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -415,12 +427,23 @@ async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) 
             reconcile(&mut tx, &multi_decree).unwrap();
             tx.commit();
         });
+        tokio::select! {
+            _ = sleep(Duration::from_millis(3000)) => {},
+            _ = shutdown.changed() => return,
+        };
     }
 }
 
-async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
+async fn run_crash_algorithm(
+    doc_handle: DocHandle,
+    participant_id: String,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
     loop {
-        sleep(Duration::from_millis(10000)).await;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(10000)) => {},
+            _ = shutdown.changed() => return,
+        };
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -432,7 +455,7 @@ async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
 
                 use std::{thread, time};
 
-                let ten_secs = time::Duration::from_millis(10000);
+                let ten_secs = time::Duration::from_millis(20000);
 
                 thread::sleep(ten_secs);
 
@@ -446,12 +469,18 @@ async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
     }
 }
 
-async fn request_increment(http_addrs: Vec<String>) {
+async fn request_increment(
+    http_addrs: Vec<String>,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+) {
     let client = reqwest::Client::new();
     let mut last = 0;
     loop {
         for addr in http_addrs.iter() {
-            sleep(Duration::from_millis(1000)).await;
+            tokio::select! {
+                _ = sleep(Duration::from_millis(1000)) => {},
+                _ = shutdown.changed() => return,
+            };
             let url = format!("http://{}/incr", addr);
             let res = client.put(url).send().await;
             //println!("Incr res: {:?}", res);
@@ -468,12 +497,15 @@ async fn request_increment(http_addrs: Vec<String>) {
     }
 }
 
-async fn request_read(http_addrs: Vec<String>) {
+async fn request_read(http_addrs: Vec<String>, mut shutdown: tokio::sync::watch::Receiver<()>) {
     let client = reqwest::Client::new();
     let mut last = 0;
     loop {
         for addr in http_addrs.iter() {
-            sleep(Duration::from_millis(1000)).await;
+            tokio::select! {
+                _ = sleep(Duration::from_millis(1000)) => {},
+                _ = shutdown.changed() => return,
+            };
             let url = format!("http://{}/read", addr);
             let res = client.get(url).send().await;
             //println!("Read res: {:?}", res);
@@ -754,43 +786,52 @@ async fn main() {
         participant_id: participant_id.clone(),
     });
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
-    handle.spawn(async move {
-        run_proposal_algorithm(&doc_handle_clone, &id, rx).await;
+    let shutdown = shutdown_rx.clone();
+    let proposer = handle.spawn(async move {
+        run_proposal_algorithm(&doc_handle_clone, &id, rx, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
-    handle.spawn(async move {
-        run_acceptor_algorithm(doc_handle_clone, &id).await;
+    let shutdown = shutdown_rx.clone();
+    let acceptor = handle.spawn(async move {
+        run_acceptor_algorithm(doc_handle_clone, &id, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
-    handle.spawn(async move {
-        run_heartbeat_algorithm(doc_handle_clone, id).await;
+    let shutdown = shutdown_rx.clone();
+    let heartbeat = handle.spawn(async move {
+        run_heartbeat_algorithm(doc_handle_clone, id, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
-    handle.spawn(async move {
-        run_learner_algorithm(doc_handle_clone, id).await;
+    let shutdown = shutdown_rx.clone();
+    let learner = handle.spawn(async move {
+        run_learner_algorithm(doc_handle_clone, id, shutdown).await;
     });
 
     let http_addrs_clone = http_addrs.clone();
-    handle.spawn(async move {
+    let shutdown = shutdown_rx.clone();
+    let incrementer = handle.spawn(async move {
         // Continuously request new increments.
-        request_increment(http_addrs_clone).await;
+        request_increment(http_addrs_clone, shutdown).await;
     });
 
-    handle.spawn(async move {
+    let shutdown = shutdown_rx.clone();
+    let reader = handle.spawn(async move {
         // Continuously request new reads.
-        request_read(http_addrs).await;
+        request_read(http_addrs, shutdown).await;
     });
 
-    handle.spawn(async move {
-        run_crash_algorithm(doc_handle, participant_id).await;
+    let shutdown = shutdown_rx.clone();
+    let crasher = handle.spawn(async move {
+        run_crash_algorithm(doc_handle, participant_id, shutdown).await;
     });
 
     let app = Router::new()
@@ -802,6 +843,20 @@ async fn main() {
     tokio::select! {
         _ = serve.fuse() => {},
         _ = tokio::signal::ctrl_c().fuse() => {
+
+            // Send shutdown signal.
+            shutdown_tx.send(()).unwrap();
+
+            // Join on tasks.
+            incrementer.await.unwrap();
+            reader.await.unwrap();
+            proposer.await.unwrap();
+            acceptor.await.unwrap();
+            heartbeat.await.unwrap();
+            learner.await.unwrap();
+            crasher.await.unwrap();
+
+            // Stop repo.
             Handle::current()
                 .spawn_blocking(|| {
                     repo_handle.stop().unwrap();
