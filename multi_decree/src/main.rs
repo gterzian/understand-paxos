@@ -2,23 +2,76 @@ use automerge_repo::fs_store::FsStore;
 use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
 use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use rand::prelude::*;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 
 const MAX: usize = 1000;
 
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
+}
+
+async fn read(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
+    let participant_id = state.participant_id.clone();
+    let is_leader = state.doc_handle.with_doc_mut(|doc| {
+        let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
+
+        // Run election
+        let _ = leader_algorithm(&mut multi_decree, &participant_id);
+
+        let our_info = multi_decree.participants.get(&participant_id).unwrap();
+        our_info.is_leader
+    });
+
+    if !is_leader {
+        return Json(None);
+    }
+
+    let (tx, rx) = oneshot::channel();
+    state
+        .command_sender
+        .send((ClientCommand::Read, tx))
+        .await
+        .unwrap();
+    Json(rx.await.unwrap())
+}
+
+async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
+    let participant_id = state.participant_id.clone();
+    let is_leader = state.doc_handle.with_doc_mut(|doc| {
+        let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
+
+        // Run election
+        let _ = leader_algorithm(&mut multi_decree, &participant_id);
+
+        let our_info = multi_decree.participants.get(&participant_id).unwrap();
+        our_info.is_leader
+    });
+
+    if !is_leader {
+        return Json(None);
+    }
+
+    let (tx, rx) = oneshot::channel();
+    state
+        .command_sender
+        .send((ClientCommand::Incr, tx))
+        .await
+        .unwrap();
+    Json(rx.await.unwrap())
 }
 
 fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> ElectionOutcome {
@@ -67,15 +120,53 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> Elec
     outcome
 }
 
-async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String) {
+fn execute_state_machine(
+    ballot_number_to_client_command: &mut Vec<Option<oneshot::Sender<Option<Value>>>>,
+    log: Vec<Option<Ballot>>,
+) {
+    let mut start = 0;
+
+    if let Some(can_execute_up_to) = log.iter().position(|x| x.is_none()) {
+        for index in 0..MAX {
+            if index >= can_execute_up_to {
+                return;
+            }
+            let cmd = log[index].as_ref().unwrap().value.clone();
+            let new_execution = match cmd {
+                ClientCommand::Read => ballot_number_to_client_command[index].take(),
+                ClientCommand::Incr => {
+                    start += 1;
+                    ballot_number_to_client_command[index].take()
+                }
+                _ => continue,
+            };
+            if let Some(chan) = new_execution {
+                chan.send(Some(Value(start))).unwrap();
+            }
+        }
+    }
+}
+
+async fn run_proposal_algorithm(
+    doc_handle: &DocHandle,
+    participant_id: &String,
+    mut command_receiver: Receiver<(ClientCommand, oneshot::Sender<Option<Value>>)>,
+) {
+    let mut pending_client_commands: VecDeque<(ClientCommand, oneshot::Sender<Option<Value>>)> =
+        Default::default();
+    let mut ballot_number_to_client_command: Vec<Option<oneshot::Sender<Option<Value>>>> = vec![];
+    for index in 0..MAX {
+        ballot_number_to_client_command.push(None);
+    }
     loop {
         sleep(Duration::from_millis(1000)).await;
-        doc_handle.with_doc_mut(|doc| {
+        let election_outcome = doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
             // Run election
             let outcome = leader_algorithm(&mut multi_decree, &participant_id);
             if let ElectionOutcome::NewlyElected = outcome {
+                println!("Elected");
                 for (id, info) in multi_decree.participants.iter() {
                     if id == participant_id {
                         continue;
@@ -94,11 +185,24 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                 // Only if newly elected as leader:
                 // Step 1: ChooseBallotNumber.
                 our_info.last_tried.increment();
+            } else if let ElectionOutcome::SteppedDown = outcome {
+                println!("stepping down");
+                // Reset the client command state.
+                pending_client_commands.drain(..).for_each(|(_, chan)| {
+                    // Send back None to all pending commands.
+                    chan.send(None).unwrap();
+                });
+                for chan in ballot_number_to_client_command.iter_mut() {
+                    if let Some(chan) = chan.take() {
+                        // Send back None to all pending commands.
+                        chan.send(None).unwrap();
+                    }
+                }
             }
-            
+
             let participants = multi_decree.participants.clone();
             let our_info = multi_decree.participants.get_mut(participant_id).unwrap();
-            
+
             // Reset older ballots.
             for ballot in our_info.ballot.iter_mut() {
                 if let Some(b) = ballot {
@@ -107,56 +211,88 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                     }
                 }
             }
-            
+
             if our_info.is_leader && our_info.log.iter().filter(|i| i.is_some()).count() < MAX {
                 for index in 0..MAX {
                     if our_info.log.get(index).unwrap().is_some() {
                         continue;
                     }
                     if let Some(ref mut ballot) = our_info.ballot.get_mut(index).unwrap() {
-                        // Step 5: HandleVoted.     
+                        // Step 5: HandleVoted.
                         for (id, info) in participants.iter() {
                             if !ballot.quorum.contains_key(id) {
                                 continue;
                             }
                             if let Some(ref vote) = info.prev_vote.get(index).unwrap() {
-                                if vote.number == ballot.number && vote.value == ballot.value {
-                                    ballot.quorum.insert(id.clone(), true);
+                                if vote.number == ballot.number {
+                                    let val = vote.value.as_ref().unwrap();
+                                    if val == &ballot.value {
+                                        ballot.quorum.insert(id.clone(), true);
+                                    }
                                 }
                             }
                         }
                         let vote_count = ballot.quorum.iter().filter(|(_, voted)| **voted).count();
                         if vote_count > participants.len() / 2 {
                             our_info.log[index] = Some(ballot.clone());
-                            break;
+
+                            // Execute state machine
+                            execute_state_machine(
+                                &mut ballot_number_to_client_command,
+                                our_info.log.clone(),
+                            );
                         }
                     } else {
                         // Step 3: HandleLastVote.
                         let mut replied: HashMap<String, Option<Vote>> = Default::default();
                         for (id, info) in participants.iter() {
                             if info.next_bal == our_info.last_tried {
-                                replied.insert(id.clone(), info.prev_vote.get(index).cloned().flatten());
+                                replied.insert(
+                                    id.clone(),
+                                    info.prev_vote.get(index).cloned().flatten(),
+                                );
                             }
                         }
                         if replied.len() > participants.len() / 2 {
                             // Step 3 (cont'd): BeginBallot.
                             let mut highest_vote = Vote {
                                 number: Number(0, participant_id.clone()),
-                                value: Value(0),
+                                value: None,
                             };
                             for vote in replied.iter().filter_map(|(_, v)| v.clone()) {
                                 if vote.number > highest_vote.number {
                                     highest_vote = vote.clone();
                                 }
                             }
-                            let value = if let Value(0) = highest_vote.value {
-                                let mut rng = rand::thread_rng();
-                                Value(rng.gen())
+
+                            let number = our_info.last_tried.clone();
+                            let value = if let None = highest_vote.value {
+                                let highest_entry = our_info
+                                    .log
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, entry)| entry.as_ref().map(|_| idx))
+                                    .max()
+                                    .unwrap_or(0);
+                                println!("Index: {:?}, highest entry: {:?}", index, highest_entry);
+                                if index < highest_entry {
+                                    // Filling in gaps
+                                    println!("Filling gap");
+                                    ClientCommand::NoOp
+                                } else {
+                                    // Assigning a client command.
+                                    if let Some((cmd, chan)) = pending_client_commands.pop_front() {
+                                        ballot_number_to_client_command[index] = Some(chan);
+                                        cmd
+                                    } else {
+                                        break;
+                                    }
+                                }
                             } else {
-                                highest_vote.value
+                                highest_vote.value.unwrap()
                             };
                             let ballot = Ballot {
-                                number: our_info.last_tried.clone(),
+                                number,
                                 value,
                                 quorum: replied.into_iter().map(|(id, _)| (id, false)).collect(),
                             };
@@ -165,14 +301,22 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                         }
                     }
                 }
-                
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &multi_decree).unwrap();
-                tx.commit();
             }
+            let mut tx = doc.transaction();
+            reconcile(&mut tx, &multi_decree).unwrap();
+            tx.commit();
+            outcome
         });
-
-        doc_handle.changed().await.unwrap();
+        tokio::select! {
+            cmd = command_receiver.recv() => {
+                if let Some(cmd) = cmd {
+                    pending_client_commands.push_back(cmd);
+                } else {
+                        return;
+                }
+            }
+            _ = doc_handle.changed() => {}
+        };
     }
 }
 
@@ -180,20 +324,20 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
     loop {
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
-            
+
             let mut next_bal = multi_decree
                 .participants
                 .get(participant_id)
                 .unwrap()
                 .next_bal
                 .clone();
-            
-                let mut prev_vote = multi_decree
-                    .participants
-                    .get_mut(participant_id)
-                    .unwrap()
-                    .prev_vote
-                    .clone();
+
+            let mut prev_vote = multi_decree
+                .participants
+                .get_mut(participant_id)
+                .unwrap()
+                .prev_vote
+                .clone();
 
             for (other_id, info) in multi_decree.participants.iter() {
                 // Check if leader.
@@ -202,12 +346,12 @@ async fn run_acceptor_algorithm(doc_handle: DocHandle, participant_id: &String) 
                 if !state_clone.participants.get(other_id).unwrap().is_leader {
                     continue;
                 }
-                
+
                 if info.last_tried > next_bal {
                     // Step 2: HandleNextBallot.
                     next_bal = info.last_tried.clone();
                 }
-                
+
                 for (index, ballot) in info.ballot.iter().enumerate() {
                     if let Some(ref ballot) = ballot {
                         // Step 4: HandleBeginBallot.
@@ -240,22 +384,20 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
                 .iter()
                 .map(|(_, info)| info.log.clone())
                 .collect();
-                
+
             let our_info = multi_decree.participants.get_mut(&participant_id).unwrap();
             for log in logs {
                 for (index, entry) in log.into_iter().enumerate() {
                     let our_entry = &mut our_info.log[index];
                     if our_entry.is_some() && entry.is_some() {
                         // Check integrity.
-                       assert_eq!(entry.unwrap().value, our_entry.as_ref().unwrap().value);                 
+                        assert_eq!(entry.unwrap().value, our_entry.as_ref().unwrap().value);
                     } else if entry.is_some() && our_entry.is_none() {
                         // Step 6: HandleSuccess.
-                       *our_entry = entry;
+                        *our_entry = entry;
                     }
                 }
             }
-            
-            println!("Our log: {:?} {:?} {:?}", our_info.log.iter().filter(|i| i.is_some()).count(), our_info.is_leader, our_info.epoch);
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &multi_decree).unwrap();
@@ -267,7 +409,7 @@ async fn run_learner_algorithm(doc_handle: DocHandle, participant_id: String) {
 
 async fn run_heartbeat_algorithm(doc_handle: DocHandle, participant_id: String) {
     loop {
-        sleep(Duration::from_millis(5000)).await;
+        sleep(Duration::from_millis(1000)).await;
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -288,13 +430,61 @@ async fn run_crash_algorithm(doc_handle: DocHandle, participant_id: String) {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
             let our_info = multi_decree.participants.get_mut(&participant_id).unwrap();
-            our_info.epoch = 0;
-            our_info.ballot = vec![None; MAX];
+            if our_info.is_leader && rand::random() {
+                our_info.epoch = 0;
+                our_info.ballot = vec![None; MAX];
+            }
+
+            println!("Crashed");
 
             let mut tx = doc.transaction();
             reconcile(&mut tx, &multi_decree).unwrap();
             tx.commit();
         });
+    }
+}
+
+async fn request_increment(doc_handle: DocHandle, http_addrs: Vec<String>) {
+    let client = reqwest::Client::new();
+    let mut last = 0;
+    loop {
+        for addr in http_addrs.iter() {
+            sleep(Duration::from_millis(1000)).await;
+            let url = format!("http://{}/incr", addr);
+            let res = client.put(url).send().await;
+            //println!("Incr res: {:?}", res);
+            if let Ok(new) = res {
+                let json_res = new.json().await;
+                //println!("Incr json: {:?}", json_res);
+                if let Ok(Some(new)) = json_res {
+                    println!("Got new increment: {:?}, versus old one: {:?}", new, last);
+                    assert!(new > last);
+                    last = new;
+                }
+            }
+        }
+    }
+}
+
+async fn request_read(doc_handle: DocHandle, http_addrs: Vec<String>) {
+    let client = reqwest::Client::new();
+    let mut last = 0;
+    loop {
+        for addr in http_addrs.iter() {
+            sleep(Duration::from_millis(1000)).await;
+            let url = format!("http://{}/read", addr);
+            let res = client.get(url).send().await;
+            //println!("Read res: {:?}", res);
+            if let Ok(new) = res {
+                let json_res = new.json().await;
+                //println!("Read json: {:?}", json_res);
+                if let Ok(Some(new)) = json_res {
+                    println!("Got new read: {:?}, versus old one: {:?}", new, last);
+                    assert!(new >= last);
+                    last = new;
+                }
+            }
+        }
     }
 }
 
@@ -309,6 +499,15 @@ struct Args {
 
 struct AppState {
     doc_handle: DocHandle,
+    command_sender: Sender<(ClientCommand, oneshot::Sender<Option<Value>>)>,
+    participant_id: String,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq)]
+enum ClientCommand {
+    Read,
+    Incr,
+    NoOp,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -320,20 +519,20 @@ impl Number {
     }
 }
 
-#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Deserialize, Serialize)]
 struct Value(u64);
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 struct Vote {
     number: Number,
-    value: Value,
+    value: Option<ClientCommand>,
 }
 
 impl From<Ballot> for Vote {
     fn from(ballot: Ballot) -> Self {
         Vote {
             number: ballot.number,
-            value: ballot.value,
+            value: Some(ballot.value),
         }
     }
 }
@@ -341,7 +540,7 @@ impl From<Ballot> for Vote {
 #[derive(Debug, Clone, Reconcile, Hydrate)]
 struct Ballot {
     number: Number,
-    value: Value,
+    value: ClientCommand,
     quorum: HashMap<String, bool>,
 }
 
@@ -545,14 +744,18 @@ async fn main() {
         repo_handle.request_document(doc_id.unwrap()).await.unwrap()
     };
 
+    let (tx, rx) = mpsc::channel(100);
+
     let app_state = Arc::new(AppState {
         doc_handle: doc_handle.clone(),
+        command_sender: tx,
+        participant_id: participant_id.clone(),
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     handle.spawn(async move {
-        run_proposal_algorithm(&doc_handle_clone, &id).await;
+        run_proposal_algorithm(&doc_handle_clone, &id, rx).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
@@ -572,13 +775,28 @@ async fn main() {
     handle.spawn(async move {
         run_learner_algorithm(doc_handle_clone, id).await;
     });
-    
+
+    let doc_handle_clone = doc_handle.clone();
+    let http_addrs_clone = http_addrs.clone();
+    handle.spawn(async move {
+        // Continuously request new increments.
+        request_increment(doc_handle_clone, http_addrs_clone).await;
+    });
+
+    let doc_handle_clone = doc_handle.clone();
+    handle.spawn(async move {
+        // Continuously request new reads.
+        request_read(doc_handle_clone, http_addrs).await;
+    });
+
     handle.spawn(async move {
         run_crash_algorithm(doc_handle, participant_id).await;
     });
 
     let app = Router::new()
         .route("/get_doc_id", get(get_doc_id))
+        .route("/read", get(read))
+        .route("/incr", put(incr))
         .with_state(app_state.clone());
     let serve = axum::Server::bind(&our_http_addr.parse().unwrap()).serve(app.into_make_service());
     tokio::select! {

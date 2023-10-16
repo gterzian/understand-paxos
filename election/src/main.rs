@@ -81,7 +81,7 @@ async fn run_leader_algorithm(doc_handle: DocHandle, participant_id: String) {
                         assert_eq!(simulated_outcome, ElectionOutcome::SteppedDown);
                     } else {
                         let simulated_outcome = leader_algorithm(&mut election.clone(), id);
-                        assert_eq!(simulated_outcome, ElectionOutcome::Unchanged);    
+                        assert_eq!(simulated_outcome, ElectionOutcome::Unchanged);
                     }
                 }
             }
