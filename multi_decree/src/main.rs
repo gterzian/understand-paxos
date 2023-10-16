@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
+use rand::seq::IteratorRandom;
 
 const MAX: usize = 1000;
 
@@ -204,7 +205,8 @@ async fn run_proposal_algorithm(
             }
 
             if our_info.is_leader && our_info.log.iter().filter(|i| i.is_some()).count() < MAX {
-                for index in 0..MAX {
+                let mut rng = rand::thread_rng();
+                for index in (0..MAX).choose_multiple(&mut rng, MAX/2) {
                     // If we already have a value in the log.
                     if our_info.log.get(index).unwrap().is_some() {
                         continue;
@@ -269,6 +271,7 @@ async fn run_proposal_algorithm(
                                 println!("Index: {:?}, highest entry: {:?}", index, highest_entry);
                                 if index < highest_entry {
                                     // Filling in gaps
+                                    println!("Filling in gaps");
                                     ClientCommand::NoOp
                                 } else {
                                     // Assigning a client command as the value to be voted on.
@@ -345,9 +348,10 @@ async fn run_acceptor_algorithm(
                     // Step 2: HandleNextBallot.
                     next_bal = info.last_tried.clone();
                 }
-
-                for (index, ballot) in info.ballot.iter().enumerate() {
-                    if let Some(ref ballot) = ballot {
+                
+                let mut rng = rand::thread_rng();
+                for index in (0..MAX).choose_multiple(&mut rng, MAX/2) {
+                    if let Some(ref ballot) = info.ballot[index] {
                         // Step 4: HandleBeginBallot.
                         if ballot.number == next_bal {
                             prev_vote[index] = Some(ballot.clone().into());
@@ -441,7 +445,7 @@ async fn run_crash_algorithm(
 ) {
     loop {
         tokio::select! {
-            _ = sleep(Duration::from_millis(10000)) => {},
+            _ = sleep(Duration::from_millis(20000)) => {},
             _ = shutdown.changed() => return,
         };
         doc_handle.with_doc_mut(|doc| {
@@ -455,7 +459,7 @@ async fn run_crash_algorithm(
 
                 use std::{thread, time};
 
-                let ten_secs = time::Duration::from_millis(20000);
+                let ten_secs = time::Duration::from_millis(2000);
 
                 thread::sleep(ten_secs);
 
