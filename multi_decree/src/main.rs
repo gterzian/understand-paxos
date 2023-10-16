@@ -294,7 +294,6 @@ async fn run_proposal_algorithm(
                                 quorum: replied.into_keys().map(|id| (id, false)).collect(),
                             };
                             our_info.ballot[index] = Some(ballot);
-                            //break;
                         }
                     }
                 }
