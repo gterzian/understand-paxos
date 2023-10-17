@@ -124,7 +124,7 @@ ChooseBallotNumber(p) == /\ p # leader
                                 voted, ledger, lastVote, ballots>>
 
 \* Step 2
-HandleNextBallot(p, msg) == 
+HandleNextBallot(p) == \E msg \in msgs:
                        /\ msg.type = "NextBallot"
                        /\ msg.src = leader 
                        /\ msg.dest = p
@@ -140,7 +140,7 @@ HandleNextBallot(p, msg) ==
                                 replied, ledger, voted, ballots>>
                         
 \* Step 3
-HandleLastVote(p, msg) == 
+HandleLastVote(p) == \E msg \in msgs:
                      /\ msg.type = "LastVote"
                      /\ msg.dest = leader  
                      /\ msg.dest = p
@@ -189,7 +189,7 @@ BeginBallot(p, i) == LET max[pp \in Participant] ==
                                     nextBal, ledger>> 
 
 \* Step 4
-HandleBeginBallot(p, i, msg) ==
+HandleBeginBallot(p, i) == \E msg \in msgs:
                            /\ msg.type = "BeginBallot"  
                            /\ msg.dest = p
                            /\ msg.src = leader  
@@ -208,8 +208,9 @@ HandleBeginBallot(p, i, msg) ==
                                 nextBal, replied,ledger, voted, ballots>> 
                             
 \* Step 5
-HandleVoted(p, i, msg) == LET hasQuorum == ballots[p][i].quorum = voted'[p][i]
+HandleVoted(p, i) == LET hasQuorum == ballots[p][i].quorum = voted'[p][i]
                           IN 
+                    \E msg \in msgs:
                     /\ msg.type = "Voted"
                     /\ msg.instance = i 
                     /\ msg.dest = leader
@@ -231,7 +232,8 @@ HandleVoted(p, i, msg) == LET hasQuorum == ballots[p][i].quorum = voted'[p][i]
                         replied, ballots, prevVote>>
                     
 \* Step 6
-HandleSuccess(p, i, msg) == /\ msg.type = "Success"
+HandleSuccess(p, i) == \E msg \in msgs:
+                            /\ msg.type = "Success"
                             /\ msg.instance = i
                             /\ msg.src = leader
                             /\ msg.dest = p
@@ -252,17 +254,16 @@ Crash(p) == /\ lastVote' = [lastVote EXCEPT ![p] =
                 [i \in Instance |-> [value |-> NoNumber, quorum |-> {}]]]
             /\ UNCHANGED<<leader, lastTried, nextBal, prevVote, ledger>>
                                                           
-Next == \E p \in Participant: \E i \in Instance:
+Next == \E p \in Participant:
            \/ Crash(p)
            \/ ChooseBallotNumber(p)
-           \/ \E msg \in msgs:
-                   \/ HandleNextBallot(p, msg)
-                   \/ HandleLastVote(p, msg)
-                   \/ BeginBallot(p, i)
-                   \/ HandleBeginBallot(p, i, msg)
-                   \/ HandleVoted(p, i, msg)
-                   \/ HandleSuccess(p, i, msg)  
-               
+           \/ HandleNextBallot(p)
+           \/ HandleLastVote(p)
+           \/ \E i \in Instance:
+                \/ BeginBallot(p, i)
+                \/ HandleBeginBallot(p, i)
+                \/ HandleVoted(p, i)
+                \/ HandleSuccess(p, i)  
 
 Spec  ==  Init  /\  [][Next]_<<leader, lastTried, prevVote, lastVote, 
                                     replied, nextBal, msgs, 
