@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use rand::prelude::SliceRandom;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -808,7 +809,9 @@ async fn main() {
     let indices = {
         if args.random {
             let mut rng = rand::thread_rng();
-            (0..MAX).choose_multiple(&mut rng, MAX / 2)
+            let mut indices = (0..MAX).choose_multiple(&mut rng, MAX);
+            indices.shuffle(&mut rng);
+            indices
         } else {
             (0..MAX).collect()
         }
