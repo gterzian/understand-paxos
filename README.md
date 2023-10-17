@@ -37,3 +37,5 @@
 * To randomize the order in which synod instances are processed, use the `--random` flag. 
 
 * To periodically simulate participants crashing, use the `--crash` flag.
+
+* Both flags can be passed to any subset of participants.

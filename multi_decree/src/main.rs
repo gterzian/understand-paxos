@@ -80,11 +80,12 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> Elec
             continue;
         }
 
+        let our_epoch_minus_theirs = our_epoch.saturating_sub(info.epoch);
         if participant_id > id {
-            if info.epoch >= our_epoch && info.is_leader {
+            if our_epoch_minus_theirs < 3 && info.is_leader {
                 our_new_leadership = false;
             }
-        } else if info.epoch >= our_epoch {
+        } else if our_epoch_minus_theirs < 3 && !our_past_leadership {
             our_new_leadership = false;
         }
     }
@@ -162,24 +163,21 @@ async fn run_proposal_algorithm(
             let outcome = leader_algorithm(&mut multi_decree, participant_id);
             if let ElectionOutcome::NewlyElected = outcome {
                 println!("Elected");
-                for (id, info) in multi_decree.participants.iter() {
-                    if id == participant_id {
-                        continue;
-                    }
-                    if info.is_leader {
-                        let simulated_outcome = leader_algorithm(&mut multi_decree.clone(), id);
-                        assert_eq!(simulated_outcome, ElectionOutcome::SteppedDown);
-                    } else {
-                        let simulated_outcome = leader_algorithm(&mut multi_decree.clone(), id);
-                        assert_eq!(simulated_outcome, ElectionOutcome::Unchanged);
-                    }
-                }
 
+                let max_tried = multi_decree
+                    .participants
+                    .values()
+                    .map(|p| p.last_tried.0)
+                    .max()
+                    .unwrap_or(0);
                 let our_info = multi_decree.participants.get_mut(participant_id).unwrap();
 
                 // Only if newly elected as leader:
                 // Step 1: ChooseBallotNumber.
-                our_info.last_tried.increment();
+                our_info.last_tried = Number(
+                    max_tried.checked_add(1).unwrap_or(0),
+                    our_info.last_tried.1.clone(),
+                );
             } else if let ElectionOutcome::SteppedDown = outcome {
                 println!("stepping down");
                 // Reset the client command state,
@@ -339,14 +337,7 @@ async fn run_acceptor_algorithm(
                 .prev_vote
                 .clone();
 
-            for (other_id, info) in multi_decree.participants.iter() {
-                // Check if leader.
-                let mut state_clone = multi_decree.clone();
-                let _outcome = leader_algorithm(&mut state_clone, other_id);
-                if !state_clone.participants.get(other_id).unwrap().is_leader {
-                    continue;
-                }
-
+            for info in multi_decree.participants.values() {
                 if info.last_tried > next_bal {
                     // Step 2: HandleNextBallot.
                     next_bal = info.last_tried.clone();
@@ -553,12 +544,6 @@ enum ClientCommand {
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Ord, PartialOrd)]
 struct Number(u64, String);
-
-impl Number {
-    fn increment(&mut self) {
-        self.0 += 1;
-    }
-}
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Deserialize, Serialize)]
 struct Value(u64);
