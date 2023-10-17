@@ -7,8 +7,6 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use rand::prelude::SliceRandom;
-use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
@@ -146,7 +144,6 @@ fn execute_state_machine(
 async fn run_proposal_algorithm(
     doc_handle: &DocHandle,
     participant_id: &ParticipantId,
-    indices: Vec<usize>,
     mut command_receiver: Receiver<(ClientCommand, oneshot::Sender<Option<Value>>)>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
@@ -157,7 +154,6 @@ async fn run_proposal_algorithm(
         ballot_number_to_client_command.push(None);
     }
     loop {
-        let indices = indices.clone();
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -207,7 +203,7 @@ async fn run_proposal_algorithm(
             }
 
             if our_info.is_leader && our_info.log.iter().filter(|i| i.is_some()).count() < MAX {
-                for index in indices {
+                for index in 0..MAX {
                     // If we already have a value in the log.
                     if our_info.log.get(index).unwrap().is_some() {
                         continue;
@@ -304,8 +300,6 @@ async fn run_proposal_algorithm(
             cmd = command_receiver.recv() => {
                 if let Some(cmd) = cmd {
                     pending_client_commands.push_back(cmd);
-                } else {
-                        return;
                 }
             }
             _ = doc_handle.changed() => {},
@@ -317,11 +311,9 @@ async fn run_proposal_algorithm(
 async fn run_acceptor_algorithm(
     doc_handle: DocHandle,
     participant_id: &ParticipantId,
-    indices: Vec<usize>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
-        let indices = indices.clone();
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -345,8 +337,8 @@ async fn run_acceptor_algorithm(
                     next_bal = info.last_tried.clone();
                 }
 
-                for index in indices.clone() {
-                    if let Some(ref ballot) = info.ballot[index] {
+                for (index, ballot) in info.ballot.iter().enumerate() {
+                    if let Some(ref ballot) = ballot {
                         // Step 4: HandleBeginBallot.
                         if ballot.number == next_bal {
                             prev_vote[index] = Some(ballot.clone().into());
@@ -523,8 +515,6 @@ async fn request_read(http_addrs: Vec<String>, mut shutdown: tokio::sync::watch:
 struct Args {
     #[arg(long)]
     bootstrap: bool,
-    #[arg(long)]
-    random: bool,
     #[arg(long)]
     crash: bool,
     #[arg(long)]
@@ -806,30 +796,18 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
-    let indices = {
-        if args.random {
-            let mut rng = rand::thread_rng();
-            let mut indices = (0..MAX).choose_multiple(&mut rng, MAX);
-            indices.shuffle(&mut rng);
-            indices
-        } else {
-            (0..MAX).collect()
-        }
-    };
-
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     let shutdown = shutdown_rx.clone();
-    let indices_clone = indices.clone();
     let proposer = handle.spawn(async move {
-        run_proposal_algorithm(&doc_handle_clone, &id, indices_clone, rx, shutdown).await;
+        run_proposal_algorithm(&doc_handle_clone, &id, rx, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     let shutdown = shutdown_rx.clone();
     let acceptor = handle.spawn(async move {
-        run_acceptor_algorithm(doc_handle_clone, &id, indices, shutdown).await;
+        run_acceptor_algorithm(doc_handle_clone, &id, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
