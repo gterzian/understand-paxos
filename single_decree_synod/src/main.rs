@@ -110,7 +110,7 @@ async fn run_proposal_algorithm(doc_handle: &DocHandle, participant_id: &String)
                     let ballot = Ballot {
                         number: our_info.last_tried.clone(),
                         value,
-                        quorum: replied.into_iter().map(|(id, _)| (id, false)).collect(),
+                        quorum: replied.into_keys().map(|id| (id, false)).collect(),
                     };
                     our_info.ballot = Some(ballot);
                 }
