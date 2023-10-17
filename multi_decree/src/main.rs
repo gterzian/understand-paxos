@@ -10,6 +10,7 @@ use futures::FutureExt;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::{Display, Formatter};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
@@ -67,7 +68,7 @@ async fn incr(State(state): State<Arc<AppState>>) -> Json<Option<Value>> {
     Json(rx.await.unwrap_or(None))
 }
 
-fn leader_algorithm(election: &mut MultiDecree, participant_id: &String) -> ElectionOutcome {
+fn leader_algorithm(election: &mut MultiDecree, participant_id: &ParticipantId) -> ElectionOutcome {
     let (our_epoch, our_past_leadership) = {
         let our_info = election.participants.get_mut(participant_id).unwrap();
         (our_info.epoch, our_info.is_leader)
@@ -143,7 +144,7 @@ fn execute_state_machine(
 
 async fn run_proposal_algorithm(
     doc_handle: &DocHandle,
-    participant_id: &String,
+    participant_id: &ParticipantId,
     indices: Vec<usize>,
     mut command_receiver: Receiver<(ClientCommand, oneshot::Sender<Option<Value>>)>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
@@ -237,7 +238,7 @@ async fn run_proposal_algorithm(
                         }
                     } else {
                         // Step 3: HandleLastVote.
-                        let mut replied: HashMap<String, Option<Vote>> = Default::default();
+                        let mut replied: HashMap<ParticipantId, Option<Vote>> = Default::default();
                         for (id, info) in participants.iter() {
                             if info.next_bal == our_info.last_tried {
                                 replied.insert(
@@ -314,7 +315,7 @@ async fn run_proposal_algorithm(
 
 async fn run_acceptor_algorithm(
     doc_handle: DocHandle,
-    participant_id: &String,
+    participant_id: &ParticipantId,
     indices: Vec<usize>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
@@ -370,7 +371,7 @@ async fn run_acceptor_algorithm(
 
 async fn run_learner_algorithm(
     doc_handle: DocHandle,
-    participant_id: String,
+    participant_id: ParticipantId,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
@@ -410,7 +411,7 @@ async fn run_learner_algorithm(
 
 async fn run_heartbeat_algorithm(
     doc_handle: DocHandle,
-    participant_id: String,
+    participant_id: ParticipantId,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
@@ -433,7 +434,7 @@ async fn run_heartbeat_algorithm(
 
 async fn run_crash_algorithm(
     doc_handle: DocHandle,
-    participant_id: String,
+    participant_id: ParticipantId,
     crash: bool,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
@@ -532,7 +533,7 @@ struct Args {
 struct AppState {
     doc_handle: DocHandle,
     command_sender: Sender<(ClientCommand, oneshot::Sender<Option<Value>>)>,
-    participant_id: String,
+    participant_id: ParticipantId,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq)]
@@ -543,7 +544,7 @@ enum ClientCommand {
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Ord, PartialOrd)]
-struct Number(u64, String);
+struct Number(u64, ParticipantId);
 
 #[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, Deserialize, Serialize)]
 struct Value(u64);
@@ -567,7 +568,7 @@ impl From<Ballot> for Vote {
 struct Ballot {
     number: Number,
     value: ClientCommand,
-    quorum: HashMap<String, bool>,
+    quorum: HashMap<ParticipantId, bool>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -575,6 +576,28 @@ enum ElectionOutcome {
     NewlyElected,
     SteppedDown,
     Unchanged,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, Eq, Hash, PartialEq, PartialOrd, Ord)]
+struct ParticipantId(String);
+
+impl Display for ParticipantId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for ParticipantId {
+    #[inline(always)]
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl From<String> for ParticipantId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate)]
@@ -593,7 +616,7 @@ struct Participant {
 
 #[derive(Default, Debug, Clone, Reconcile, Hydrate)]
 struct MultiDecree {
-    participants: HashMap<String, Participant>,
+    participants: HashMap<ParticipantId, Participant>,
 }
 
 struct BlockingFsStorage(Arc<Mutex<FsStore>>);
@@ -726,8 +749,8 @@ async fn main() {
         let mut multi_decree: MultiDecree = Default::default();
         for participant_id in customers.clone() {
             let participant = Participant {
-                last_tried: Number(0, participant_id.clone()),
-                next_bal: Number(0, participant_id.clone()),
+                last_tried: Number(0, ParticipantId(participant_id.clone())),
+                next_bal: Number(0, ParticipantId(participant_id.clone())),
                 prev_vote: vec![None; MAX],
                 ballot: vec![None; MAX],
                 log: vec![None; MAX],
@@ -736,7 +759,7 @@ async fn main() {
             };
             multi_decree
                 .participants
-                .insert(participant_id.to_string(), participant);
+                .insert(ParticipantId(participant_id.to_string()), participant);
         }
 
         // The initial document.
@@ -769,6 +792,8 @@ async fn main() {
         // Get the document.
         repo_handle.request_document(doc_id.unwrap()).await.unwrap()
     };
+
+    let participant_id = ParticipantId(participant_id);
 
     let (tx, rx) = mpsc::channel(100);
 
