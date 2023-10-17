@@ -33,3 +33,7 @@
    - `cargo run -p multi_decree --release --  --participant-id "2"`
    - `cargo run -p multi_decree --release --  --participant-id "3"`
 3. Watch the peers reach consensus on a sequence of values.
+
+* To randomize the order in which synod instances are processed, use the `--random` flag. 
+
+* To periodically simulate participants crashing, use the `--crash` flag.

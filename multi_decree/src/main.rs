@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -142,6 +143,7 @@ fn execute_state_machine(
 async fn run_proposal_algorithm(
     doc_handle: &DocHandle,
     participant_id: &String,
+    indices: Vec<usize>,
     mut command_receiver: Receiver<(ClientCommand, oneshot::Sender<Option<Value>>)>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
@@ -152,6 +154,7 @@ async fn run_proposal_algorithm(
         ballot_number_to_client_command.push(None);
     }
     loop {
+        let indices = indices.clone();
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -204,7 +207,7 @@ async fn run_proposal_algorithm(
             }
 
             if our_info.is_leader && our_info.log.iter().filter(|i| i.is_some()).count() < MAX {
-                for index in 0..MAX {
+                for index in indices {
                     // If we already have a value in the log.
                     if our_info.log.get(index).unwrap().is_some() {
                         continue;
@@ -268,6 +271,7 @@ async fn run_proposal_algorithm(
                                     .unwrap_or(0);
                                 println!("Index: {:?}, highest entry: {:?}", index, highest_entry);
                                 if index < highest_entry {
+                                    println!("Filling in gaps");
                                     // Filling in gaps
                                     ClientCommand::NoOp
                                 } else {
@@ -313,9 +317,11 @@ async fn run_proposal_algorithm(
 async fn run_acceptor_algorithm(
     doc_handle: DocHandle,
     participant_id: &String,
+    indices: Vec<usize>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
+        let indices = indices.clone();
         doc_handle.with_doc_mut(|doc| {
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
@@ -346,8 +352,8 @@ async fn run_acceptor_algorithm(
                     next_bal = info.last_tried.clone();
                 }
 
-                for (index, ballot) in info.ballot.iter().enumerate() {
-                    if let Some(ref ballot) = ballot {
+                for index in indices.clone() {
+                    if let Some(ref ballot) = info.ballot[index] {
                         // Step 4: HandleBeginBallot.
                         if ballot.number == next_bal {
                             prev_vote[index] = Some(ballot.clone().into());
@@ -437,6 +443,7 @@ async fn run_heartbeat_algorithm(
 async fn run_crash_algorithm(
     doc_handle: DocHandle,
     participant_id: String,
+    crash: bool,
     mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     loop {
@@ -448,7 +455,7 @@ async fn run_crash_algorithm(
             let mut multi_decree: MultiDecree = hydrate(doc).unwrap();
 
             let our_info = multi_decree.participants.get_mut(&participant_id).unwrap();
-            if our_info.is_leader && rand::random() {
+            if our_info.is_leader && rand::random() && crash {
                 our_info.epoch = 0;
                 our_info.ballot = vec![None; MAX];
                 println!("Crash start");
@@ -523,6 +530,10 @@ async fn request_read(http_addrs: Vec<String>, mut shutdown: tokio::sync::watch:
 struct Args {
     #[arg(long)]
     bootstrap: bool,
+    #[arg(long)]
+    random: bool,
+    #[arg(long)]
+    crash: bool,
     #[arg(long)]
     participant_id: String,
 }
@@ -784,18 +795,28 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
+    let indices = {
+        if args.random {
+            let mut rng = rand::thread_rng();
+            (0..MAX).choose_multiple(&mut rng, MAX / 2)
+        } else {
+            (0..MAX).collect()
+        }
+    };
+
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     let shutdown = shutdown_rx.clone();
+    let indices_clone = indices.clone();
     let proposer = handle.spawn(async move {
-        run_proposal_algorithm(&doc_handle_clone, &id, rx, shutdown).await;
+        run_proposal_algorithm(&doc_handle_clone, &id, indices_clone, rx, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
     let id = participant_id.clone();
     let shutdown = shutdown_rx.clone();
     let acceptor = handle.spawn(async move {
-        run_acceptor_algorithm(doc_handle_clone, &id, shutdown).await;
+        run_acceptor_algorithm(doc_handle_clone, &id, indices, shutdown).await;
     });
 
     let doc_handle_clone = doc_handle.clone();
@@ -827,7 +848,7 @@ async fn main() {
 
     let shutdown = shutdown_rx.clone();
     let crasher = handle.spawn(async move {
-        run_crash_algorithm(doc_handle, participant_id, shutdown).await;
+        run_crash_algorithm(doc_handle, participant_id, args.crash, shutdown).await;
     });
 
     let app = Router::new()
