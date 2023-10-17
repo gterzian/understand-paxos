@@ -32,7 +32,7 @@
 2. Start two other peers:
    - `cargo run -p multi_decree --release --  --participant-id "2"`
    - `cargo run -p multi_decree --release --  --participant-id "3"`
-3. Watch the peers reach consensus on a sequence of values.
+3. Watch the peers reach consensus on a sequence of values, using it to implement a replicated state machine supporting "read" and "increment" operations on a number.
 
 * To randomize the order in which synod instances are processed, use the `--random` flag. 
 
