@@ -113,7 +113,7 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &ParticipantId) 
 }
 
 fn execute_state_machine(
-    ballot_number_to_client_command: &mut [Option<oneshot::Sender<Option<Value>>>],
+    ballot_number_to_client_request: &mut [Option<oneshot::Sender<Option<Value>>>],
     log: &[Option<Ballot>],
 ) {
     let mut state = 0;
@@ -123,10 +123,10 @@ fn execute_state_machine(
             None => break,
         };
         let new_execution = match cmd {
-            ClientCommand::Read => ballot_number_to_client_command[index].take(),
+            ClientCommand::Read => ballot_number_to_client_request[index].take(),
             ClientCommand::Incr => {
                 state += 1;
-                ballot_number_to_client_command[index].take()
+                ballot_number_to_client_request[index].take()
             }
             ClientCommand::NoOp => continue,
         };
@@ -144,9 +144,9 @@ async fn run_proposal_algorithm(
 ) {
     let mut pending_client_commands: VecDeque<(ClientCommand, oneshot::Sender<Option<Value>>)> =
         Default::default();
-    let mut ballot_number_to_client_command: Vec<Option<oneshot::Sender<Option<Value>>>> = vec![];
+    let mut ballot_number_to_client_request: Vec<Option<oneshot::Sender<Option<Value>>>> = vec![];
     for _ in 0..MAX {
-        ballot_number_to_client_command.push(None);
+        ballot_number_to_client_request.push(None);
     }
     loop {
         doc_handle.with_doc_mut(|doc| {
@@ -178,7 +178,7 @@ async fn run_proposal_algorithm(
                 pending_client_commands.drain(..).for_each(|(_, chan)| {
                     chan.send(None).unwrap();
                 });
-                for chan in ballot_number_to_client_command.iter_mut() {
+                for chan in ballot_number_to_client_request.iter_mut() {
                     if let Some(chan) = chan.take() {
                         chan.send(None).unwrap();
                     }
@@ -224,7 +224,7 @@ async fn run_proposal_algorithm(
 
                             // Execute state machine
                             execute_state_machine(
-                                &mut ballot_number_to_client_command,
+                                &mut ballot_number_to_client_request,
                                 &our_info.log,
                             );
                         }
@@ -268,7 +268,7 @@ async fn run_proposal_algorithm(
                                 } else {
                                     // Assigning a client command as the value to be voted on.
                                     if let Some((cmd, chan)) = pending_client_commands.pop_front() {
-                                        ballot_number_to_client_command[index] = Some(chan);
+                                        ballot_number_to_client_request[index] = Some(chan);
                                         cmd
                                     } else {
                                         break;
