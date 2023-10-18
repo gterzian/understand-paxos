@@ -116,27 +116,24 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &ParticipantId) 
 
 fn execute_state_machine(
     ballot_number_to_client_command: &mut [Option<oneshot::Sender<Option<Value>>>],
-    log: Vec<Option<Ballot>>,
+    log: &[Option<Ballot>],
 ) {
     let mut start = 0;
-
-    if let Some(can_execute_up_to) = log.iter().position(|x| x.is_none()) {
-        for index in 0..MAX {
-            if index >= can_execute_up_to {
-                return;
+    for (index, entry) in log.iter().enumerate() {
+        let cmd = match entry {
+            Some(ballot) => &ballot.value,
+            None => break,
+        };
+        let new_execution = match cmd {
+            ClientCommand::Read => ballot_number_to_client_command[index].take(),
+            ClientCommand::Incr => {
+                start += 1;
+                ballot_number_to_client_command[index].take()
             }
-            let cmd = log[index].as_ref().unwrap().value.clone();
-            let new_execution = match cmd {
-                ClientCommand::Read => ballot_number_to_client_command[index].take(),
-                ClientCommand::Incr => {
-                    start += 1;
-                    ballot_number_to_client_command[index].take()
-                }
-                _ => continue,
-            };
-            if let Some(chan) = new_execution {
-                chan.send(Some(Value(start))).unwrap();
-            }
+            _ => continue,
+        };
+        if let Some(chan) = new_execution {
+            chan.send(Some(Value(start))).unwrap();
         }
     }
 }
@@ -230,7 +227,7 @@ async fn run_proposal_algorithm(
                             // Execute state machine
                             execute_state_machine(
                                 &mut ballot_number_to_client_command,
-                                our_info.log.clone(),
+                                &our_info.log,
                             );
                         }
                     } else {
