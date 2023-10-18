@@ -74,7 +74,6 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &ParticipantId) 
     };
 
     let mut our_new_leadership = true;
-
     for (id, info) in election.participants.iter() {
         if id == participant_id {
             continue;
