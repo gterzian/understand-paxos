@@ -117,7 +117,7 @@ fn execute_state_machine(
     ballot_number_to_client_command: &mut [Option<oneshot::Sender<Option<Value>>>],
     log: &[Option<Ballot>],
 ) {
-    let mut start = 0;
+    let mut state = 0;
     for (index, entry) in log.iter().enumerate() {
         let cmd = match entry {
             Some(ballot) => &ballot.value,
@@ -126,13 +126,13 @@ fn execute_state_machine(
         let new_execution = match cmd {
             ClientCommand::Read => ballot_number_to_client_command[index].take(),
             ClientCommand::Incr => {
-                start += 1;
+                state += 1;
                 ballot_number_to_client_command[index].take()
             }
             ClientCommand::NoOp => continue,
         };
         if let Some(chan) = new_execution {
-            chan.send(Some(Value(start))).unwrap();
+            chan.send(Some(Value(state))).unwrap();
         }
     }
 }
