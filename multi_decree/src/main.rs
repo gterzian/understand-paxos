@@ -130,7 +130,7 @@ fn execute_state_machine(
                 start += 1;
                 ballot_number_to_client_command[index].take()
             }
-            _ => continue,
+            ClientCommand::NoOp => continue,
         };
         if let Some(chan) = new_execution {
             chan.send(Some(Value(start))).unwrap();
