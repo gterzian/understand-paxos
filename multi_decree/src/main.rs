@@ -79,7 +79,6 @@ fn leader_algorithm(election: &mut MultiDecree, participant_id: &ParticipantId) 
         if id == participant_id {
             continue;
         }
-
         let our_epoch_minus_theirs = our_epoch.saturating_sub(info.epoch);
         if participant_id > id {
             if our_epoch_minus_theirs < 3 && info.is_leader {
