@@ -241,22 +241,9 @@ Next == \/ \E p \in Participant:
             \/ HandleSuccess(p)
             \/ Crash(p)                   
 =============================================================================
-
-vars == <<lastTried, lastVote, prevVote, 
+Spec  ==  Init  /\  [][Next]_<<lastTried, lastVote, prevVote, 
                                 nextBal, msgs, replied, ledger, voted>>
-
-Spec  ==  Init  /\  [][Next]_vars
 
 \* Spec implies those three invariants.
 THEOREM  Spec  =>  [](TypeOk /\ CoherenceInv /\ PaxosInv)
-
-PaxosImpliesCoherenceSpec == Init /\ TypeOk /\ PaxosInv [][UNCHANGED]_vars
-
-\* PaxosInv implies CoherenceInv
-THEOREM  PaxosImpliesCoherenceSpec  =>  [](CoherenceInv)
-
-PaxosInvIsInductiveSpec == Init /\ TypeOk /\ PaxosInv [][Next]_vars
-
-\* PaxosInv is an inductive invariant
-THEOREM PaxosInvIsInductiveSpec => [](TypeOk /\ PaxosInv)
 =============================================================================
